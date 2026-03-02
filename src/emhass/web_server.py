@@ -6,7 +6,6 @@ import logging
 import os
 import pickle
 import re
-import threading
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -641,11 +640,9 @@ async def action_call(action_name: str):
     if len(continual_publish_thread) == 0 and input_data_dict["retrieve_hass_conf"].get(
         "continual_publish", False
     ):
-        continual_loop = threading.Thread(
-            name="continual_publish",
-            target=lambda: asyncio.run(continual_publish(input_data_dict, entity_path, app.logger)),
+        continual_loop = app.add_background_task(
+            continual_publish, input_data_dict, entity_path, app.logger
         )
-        continual_loop.start()
         continual_publish_thread.append(continual_loop)
 
     # Execute Action
