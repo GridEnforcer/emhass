@@ -535,35 +535,58 @@ def treat_runtimeparams(
             else:
                 prediction_horizon = runtimeparams["prediction_horizon"]
             params["passed_data"]["prediction_horizon"] = prediction_horizon
-            if "soc_init" not in runtimeparams.keys():
-                soc_init = params["plant_conf"]["battery_target_state_of_charge"]
+            num_batteries = params["optim_conf"].get("number_of_batteries", 1) or 1
+            soc_min_list = params["plant_conf"].get(
+                "battery_minimum_state_of_charge_list",
+                [params["plant_conf"]["battery_minimum_state_of_charge"]] * num_batteries,
+            )
+            soc_max_list = params["plant_conf"].get(
+                "battery_maximum_state_of_charge_list",
+                [params["plant_conf"]["battery_maximum_state_of_charge"]] * num_batteries,
+            )
+            target_soc_list = params["plant_conf"].get(
+                "battery_target_state_of_charge_list",
+                [params["plant_conf"]["battery_target_state_of_charge"]] * num_batteries,
+            )
+            # Handle soc_init: accept scalar (backwards compat) or list
+            if "soc_init" not in runtimeparams:
+                soc_init = list(target_soc_list)
             else:
                 soc_init = runtimeparams["soc_init"]
-            if soc_init < params["plant_conf"]["battery_minimum_state_of_charge"]:
-                logger.warning(
-                    f"Passed soc_init={soc_init} is lower than soc_min={params['plant_conf']['battery_minimum_state_of_charge']}, setting soc_init=soc_min"
-                )
-                soc_init = params["plant_conf"]["battery_minimum_state_of_charge"]
-            if soc_init > params["plant_conf"]["battery_maximum_state_of_charge"]:
-                logger.warning(
-                    f"Passed soc_init={soc_init} is greater than soc_max={params['plant_conf']['battery_maximum_state_of_charge']}, setting soc_init=soc_max"
-                )
-                soc_init = params["plant_conf"]["battery_maximum_state_of_charge"]
+                if isinstance(soc_init, (int, float)):
+                    soc_init = [float(soc_init)] * num_batteries
+            # Clamp each battery's soc_init
+            for b in range(len(soc_init)):
+                if soc_init[b] < soc_min_list[b]:
+                    logger.warning(
+                        f"soc_init[{b}]={soc_init[b]} < soc_min={soc_min_list[b]}, clamping"
+                    )
+                    soc_init[b] = soc_min_list[b]
+                if soc_init[b] > soc_max_list[b]:
+                    logger.warning(
+                        f"soc_init[{b}]={soc_init[b]} > soc_max={soc_max_list[b]}, clamping"
+                    )
+                    soc_init[b] = soc_max_list[b]
             params["passed_data"]["soc_init"] = soc_init
-            if "soc_final" not in runtimeparams.keys():
-                soc_final = params["plant_conf"]["battery_target_state_of_charge"]
+            # Handle soc_final: accept scalar (backwards compat) or list
+            if "soc_final" not in runtimeparams:
+                soc_final = list(target_soc_list)
             else:
                 soc_final = runtimeparams["soc_final"]
-            if soc_final < params["plant_conf"]["battery_minimum_state_of_charge"]:
-                logger.warning(
-                    f"Passed soc_final={soc_final} is lower than soc_min={params['plant_conf']['battery_minimum_state_of_charge']}, setting soc_final=soc_min"
-                )
-                soc_final = params["plant_conf"]["battery_minimum_state_of_charge"]
-            if soc_final > params["plant_conf"]["battery_maximum_state_of_charge"]:
-                logger.warning(
-                    f"Passed soc_final={soc_final} is greater than soc_max={params['plant_conf']['battery_maximum_state_of_charge']}, setting soc_final=soc_max"
-                )
-                soc_final = params["plant_conf"]["battery_maximum_state_of_charge"]
+                if isinstance(soc_final, (int, float)):
+                    soc_final = [float(soc_final)] * num_batteries
+            # Clamp each battery's soc_final
+            for b in range(len(soc_final)):
+                if soc_final[b] < soc_min_list[b]:
+                    logger.warning(
+                        f"soc_final[{b}]={soc_final[b]} < soc_min={soc_min_list[b]}, clamping"
+                    )
+                    soc_final[b] = soc_min_list[b]
+                if soc_final[b] > soc_max_list[b]:
+                    logger.warning(
+                        f"soc_final[{b}]={soc_final[b]} > soc_max={soc_max_list[b]}, clamping"
+                    )
+                    soc_final[b] = soc_max_list[b]
             params["passed_data"]["soc_final"] = soc_final
             if "operating_timesteps_of_each_deferrable_load" in runtimeparams.keys():
                 params["passed_data"]["operating_timesteps_of_each_deferrable_load"] = (
@@ -582,6 +605,12 @@ def treat_runtimeparams(
             params["passed_data"]["end_timesteps_of_each_deferrable_load"] = params[
                 "optim_conf"
             ].get("end_timesteps_of_each_deferrable_load", None)
+
+            # Battery availability windows
+            if "batt_start_timestep" in runtimeparams:
+                params["passed_data"]["batt_start_timestep"] = runtimeparams["batt_start_timestep"]
+            if "batt_end_timestep" in runtimeparams:
+                params["passed_data"]["batt_end_timestep"] = runtimeparams["batt_end_timestep"]
 
             forecast_dates = copy.deepcopy(forecast_dates)[0:prediction_horizon]
 
@@ -1704,6 +1733,10 @@ def build_params(
         params["optim_conf"]["set_nodischarge_to_grid_list"] = check_battery_params(
             num_batteries, params["plant_conf"], params["optim_conf"],
             "set_nodischarge_to_grid", True, logger
+        )
+        params["plant_conf"]["battery_is_dc_coupled_list"] = check_battery_params(
+            num_batteries, params["plant_conf"], params["optim_conf"],
+            "battery_is_dc_coupled", True, logger
         )
     else:
         # No batteries, set number_of_batteries to 0

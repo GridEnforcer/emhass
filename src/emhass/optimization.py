@@ -149,6 +149,8 @@ class Optimization:
             if "set_nodischarge_to_grid_list" not in self.optim_conf:
                 val = self.optim_conf.get("set_nodischarge_to_grid", True)
                 self.optim_conf["set_nodischarge_to_grid_list"] = [val] * num_batteries
+            if "battery_is_dc_coupled_list" not in self.plant_conf:
+                self.plant_conf["battery_is_dc_coupled_list"] = [True] * num_batteries
         else:
             if "number_of_batteries" not in self.optim_conf:
                 self.optim_conf["number_of_batteries"] = 0
@@ -170,12 +172,14 @@ class Optimization:
         P_load: np.array,
         unit_load_cost: np.array,
         unit_prod_price: np.array,
-        soc_init: float | None = None,
-        soc_final: float | None = None,
+        soc_init: float | list | None = None,
+        soc_final: float | list | None = None,
         def_total_hours: list | None = None,
         def_total_timestep: list | None = None,
         def_start_timestep: list | None = None,
         def_end_timestep: list | None = None,
+        batt_start_timestep: list | None = None,
+        batt_end_timestep: list | None = None,
         debug: bool | None = False,
     ) -> pd.DataFrame:
         r"""
@@ -197,12 +201,14 @@ class Optimization:
             This is the price of the energy injected to the utility in a vector \
             sampled at the fixed freq value.
         :type unit_prod_price: np.array
-        :param soc_init: The initial battery SOC for the optimization. This parameter \
-            is optional, if not given soc_init = soc_final = soc_target from the configuration file.
-        :type soc_init: float
-        :param soc_final: The final battery SOC for the optimization. This parameter \
-            is optional, if not given soc_init = soc_final = soc_target from the configuration file.
-        :type soc_final:
+        :param soc_init: The initial battery SOC for the optimization. Can be a float \
+            (applied to all batteries) or a list of floats (one per battery). \
+            If not given, defaults to battery_target_state_of_charge per battery.
+        :type soc_init: float | list[float]
+        :param soc_final: The final battery SOC for the optimization. Can be a float \
+            (applied to all batteries) or a list of floats (one per battery). \
+            If not given, defaults to battery_target_state_of_charge per battery.
+        :type soc_final: float | list[float]
         :param def_total_hours: The functioning hours for this iteration for each deferrable load. \
             (For continuous deferrable loads: functioning hours at nominal power)
         :type def_total_hours: list
@@ -220,16 +226,24 @@ class Optimization:
         """
         # Prepare some data in the case of a battery
         if self.optim_conf["set_use_battery"]:
+            num_batteries = self.optim_conf["number_of_batteries"]
+            target_soc_list = self.plant_conf["battery_target_state_of_charge_list"]
+            # Expand soc_init to a per-battery list
             if soc_init is None:
                 if soc_final is not None:
                     soc_init = soc_final
                 else:
-                    soc_init = self.plant_conf["battery_target_state_of_charge"]
+                    soc_init = list(target_soc_list)
+            if isinstance(soc_init, (int, float)):
+                soc_init = [float(soc_init)] * num_batteries
+            # Expand soc_final to a per-battery list
             if soc_final is None:
                 if soc_init is not None:
-                    soc_final = soc_init
+                    soc_final = list(soc_init)
                 else:
-                    soc_final = self.plant_conf["battery_target_state_of_charge"]
+                    soc_final = list(target_soc_list)
+            if isinstance(soc_final, (int, float)):
+                soc_final = [float(soc_final)] * num_batteries
             self.logger.debug(
                 f"Battery usage enabled. Initial SOC: {soc_init}, Final SOC: {soc_final}"
             )
@@ -250,6 +264,17 @@ class Optimization:
             ]
         if def_end_timestep is None:
             def_end_timestep = self.optim_conf["end_timesteps_of_each_deferrable_load"]
+
+        # Battery availability windows (per-battery start/end timestep)
+        if self.optim_conf.get("set_use_battery", False):
+            num_batteries = self.optim_conf["number_of_batteries"]
+            if batt_start_timestep is None:
+                batt_start_timestep = [0] * num_batteries
+            if batt_end_timestep is None:
+                batt_end_timestep = [0] * num_batteries
+            batt_start_timestep = batt_start_timestep + [0] * (num_batteries - len(batt_start_timestep))
+            batt_end_timestep = batt_end_timestep + [0] * (num_batteries - len(batt_end_timestep))
+
         type_self_conso = "bigm"  # maxmin
 
         num_deferrable_loads = self.optim_conf["number_of_deferrable_loads"]
@@ -502,13 +527,18 @@ class Optimization:
         ## Setting constraints
         # The main constraint: power balance
         if self.plant_conf["inverter_is_hybrid"]:
+            # Identify AC-coupled batteries (they bypass the hybrid inverter)
+            dc_coupled = self.plant_conf.get("battery_is_dc_coupled_list", [True] * self.optim_conf["number_of_batteries"])
+            ac_batt_indices = [b for b in range(self.optim_conf["number_of_batteries"]) if not dc_coupled[b]]
             constraints = {
                 f"constraint_main1_{i}": plp.LpConstraint(
                     e=P_hybrid_inverter[i]
                     - P_def_sum[i]
                     - P_load[i]
                     + P_grid_neg[i]
-                    + P_grid_pos[i],
+                    + P_grid_pos[i]
+                    + plp.lpSum(P_sto_pos_list[b][i] for b in ac_batt_indices)
+                    + plp.lpSum(P_sto_neg_list[b][i] for b in ac_batt_indices),
                     sense=plp.LpConstraintEQ,
                     rhs=0,
                 )
@@ -626,16 +656,17 @@ class Optimization:
             }
 
             # Define the core energy balance equations for each timestep
+            dc_batt_indices = [b for b in range(self.optim_conf["number_of_batteries"]) if dc_coupled[b]]
             for i in set_I:
-                # The net DC power from PV and battery must equal the net DC flow of the inverter
+                # The net DC power from PV and DC-coupled batteries must equal the net DC flow of the inverter
                 constraints.update(
                     {
                         f"constraint_dc_bus_balance_{i}": plp.LpConstraint(
                             e=(
                                 P_PV[i]
                                 - P_PV_curtailment[i]
-                                + plp.lpSum(P_sto_pos_list[b][i] for b in range(self.optim_conf["number_of_batteries"]))
-                                + plp.lpSum(P_sto_neg_list[b][i] for b in range(self.optim_conf["number_of_batteries"]))
+                                + plp.lpSum(P_sto_pos_list[b][i] for b in dc_batt_indices)
+                                + plp.lpSum(P_sto_neg_list[b][i] for b in dc_batt_indices)
                             )
                             - (P_dc_ac[i] - P_ac_dc[i]),
                             sense=plp.LpConstraintEQ,
@@ -1260,7 +1291,7 @@ class Optimization:
                             )
                             * (
                                 self.plant_conf["battery_maximum_state_of_charge_list"][b]
-                                - soc_init
+                                - soc_init[b]
                             ),
                         )
                         for i in set_I
@@ -1282,7 +1313,7 @@ class Optimization:
                                 / self.timeStep
                             )
                             * (
-                                soc_init
+                                soc_init[b]
                                 - self.plant_conf["battery_minimum_state_of_charge_list"][b]
                             ),
                         )
@@ -1300,12 +1331,38 @@ class Optimization:
                                 for i in set_I
                             ),
                             sense=plp.LpConstraintEQ,
-                            rhs=(soc_init - soc_final)
+                            rhs=(soc_init[b] - soc_final[b])
                             * self.plant_conf["battery_nominal_energy_capacity_list"][b]
                             / self.timeStep,
                         )
                     }
                 )
+        # Battery availability window constraints: force zero power outside [start, end)
+        if self.optim_conf.get("set_use_battery", False):
+            for b in range(self.optim_conf["number_of_batteries"]):
+                batt_start = batt_start_timestep[b]
+                batt_end = batt_end_timestep[b]
+                # 0 means no constraint (entire horizon)
+                if batt_start == 0 and batt_end == 0:
+                    continue
+                if batt_end == 0:
+                    batt_end = n
+                self.logger.debug(
+                    f"Battery {b}: availability window [{batt_start}, {batt_end})"
+                )
+                for i in set_I:
+                    if i < batt_start or i >= batt_end:
+                        constraints[f"constraint_batt_avail_pos_{b}_{i}"] = plp.LpConstraint(
+                            e=P_sto_pos_list[b][i],
+                            sense=plp.LpConstraintEQ,
+                            rhs=0,
+                        )
+                        constraints[f"constraint_batt_avail_neg_{b}_{i}"] = plp.LpConstraint(
+                            e=P_sto_neg_list[b][i],
+                            sense=plp.LpConstraintEQ,
+                            rhs=0,
+                        )
+
         opt_model.constraints = constraints
 
         ## Finally, we call the solver to solve our optimization model:
@@ -1376,7 +1433,7 @@ class Optimization:
                     * (self.timeStep / (self.plant_conf["battery_nominal_energy_capacity_list"][b]))
                     for i in set_I
                 ]
-                SOCinit = copy.copy(soc_init)
+                SOCinit = copy.copy(soc_init[b])
                 SOC_opt = []
                 for i in set_I:
                     SOC_opt.append(SOCinit - SOC_opt_delta[i])
@@ -1631,12 +1688,14 @@ class Optimization:
         P_PV: pd.Series,
         P_load: pd.Series,
         prediction_horizon: int,
-        soc_init: float | None = None,
-        soc_final: float | None = None,
+        soc_init: float | list | None = None,
+        soc_final: float | list | None = None,
         def_total_hours: list | None = None,
         def_total_timestep: list | None = None,
         def_start_timestep: list | None = None,
         def_end_timestep: list | None = None,
+        batt_start_timestep: list | None = None,
+        batt_end_timestep: list | None = None,
     ) -> pd.DataFrame:
         r"""
         Perform a naive approach to a Model Predictive Control (MPC). \
@@ -1700,6 +1759,8 @@ class Optimization:
             def_total_timestep=def_total_timestep,
             def_start_timestep=def_start_timestep,
             def_end_timestep=def_end_timestep,
+            batt_start_timestep=batt_start_timestep,
+            batt_end_timestep=batt_end_timestep,
         )
         return self.opt_res
 

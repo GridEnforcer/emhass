@@ -782,6 +782,8 @@ def naive_mpc_optim(
     def_end_timestep = input_data_dict["params"]["optim_conf"][
         "end_timesteps_of_each_deferrable_load"
     ]
+    batt_start_timestep = input_data_dict["params"]["passed_data"].get("batt_start_timestep", None)
+    batt_end_timestep = input_data_dict["params"]["passed_data"].get("batt_end_timestep", None)
     opt_res_naive_mpc = input_data_dict["opt"].perform_naive_mpc_optim(
         df_input_data_dayahead,
         input_data_dict["P_PV_forecast"],
@@ -793,6 +795,8 @@ def naive_mpc_optim(
         def_total_timestep,
         def_start_timestep,
         def_end_timestep,
+        batt_start_timestep,
+        batt_end_timestep,
     )
     # Save CSV file for publish_data
     if save_data_to_file:
