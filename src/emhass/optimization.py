@@ -129,6 +129,18 @@ class Optimization:
         self.num_timesteps = int(self.time_delta / self.freq)
         self.logger.debug(f"CVXPY: Initialization with {self.num_timesteps} time steps.")
 
+        # Multi-battery initialization
+        if self.optim_conf.get("set_use_battery", False):
+            self.num_batteries = self.optim_conf.get("number_of_batteries", 1)
+            if self.num_batteries < 1:
+                self.num_batteries = 1
+        else:
+            self.num_batteries = 0
+
+        # Broadcast scalar battery params to per-battery lists
+        if self.num_batteries > 0:
+            self._init_battery_param_lists()
+
         # Define Parameters (Data holders)
         # These will be updated in perform_optimization without rebuilding the problem
         self.param_pv_forecast = cp.Parameter(self.num_timesteps, name="pv_forecast")
@@ -136,15 +148,90 @@ class Optimization:
         self.param_load_cost = cp.Parameter(self.num_timesteps, name="load_cost")
         self.param_prod_price = cp.Parameter(self.num_timesteps, name="prod_price")
 
-        # Scalar Parameters
+        # Per-battery SOC parameters (scalars per battery)
         self.param_soc_init = cp.Parameter(nonneg=True, name="soc_init")
         self.param_soc_final = cp.Parameter(nonneg=True, name="soc_final")
+        self.param_soc_init_list = []
+        self.param_soc_final_list = []
+        for b in range(max(self.num_batteries, 1)):
+            self.param_soc_init_list.append(cp.Parameter(nonneg=True, name=f"soc_init_{b}"))
+            self.param_soc_final_list.append(cp.Parameter(nonneg=True, name=f"soc_final_{b}"))
 
         # Initialize Variables & Bound Constraints
         self.vars, self.constraints = self._initialize_decision_variables()
 
         # Note: The self.prob object will be constructed in a subsequent step
         self.prob = None
+
+    def _broadcast_battery_param(self, key, default):
+        """Broadcast a scalar battery param to a list of length num_batteries."""
+        val = self.plant_conf.get(key, default)
+        if isinstance(val, list):
+            lst = val[:self.num_batteries]
+            while len(lst) < self.num_batteries:
+                lst.append(default)
+            return lst
+        return [val] * self.num_batteries
+
+    def _broadcast_optim_param(self, key, default):
+        """Broadcast a scalar optim_conf param to a list of length num_batteries."""
+        val = self.optim_conf.get(key, default)
+        if isinstance(val, list):
+            lst = val[:self.num_batteries]
+            while len(lst) < self.num_batteries:
+                lst.append(default)
+            return lst
+        return [val] * self.num_batteries
+
+    def _init_battery_param_lists(self):
+        """Initialize per-battery parameter lists by broadcasting scalars."""
+        N = self.num_batteries
+        self.plant_conf["battery_discharge_power_max_list"] = self._broadcast_battery_param(
+            "battery_discharge_power_max_list",
+            self.plant_conf.get("battery_discharge_power_max", 1000),
+        )
+        self.plant_conf["battery_charge_power_max_list"] = self._broadcast_battery_param(
+            "battery_charge_power_max_list",
+            self.plant_conf.get("battery_charge_power_max", 1000),
+        )
+        self.plant_conf["battery_discharge_efficiency_list"] = self._broadcast_battery_param(
+            "battery_discharge_efficiency_list",
+            self.plant_conf.get("battery_discharge_efficiency", 0.95),
+        )
+        self.plant_conf["battery_charge_efficiency_list"] = self._broadcast_battery_param(
+            "battery_charge_efficiency_list",
+            self.plant_conf.get("battery_charge_efficiency", 0.95),
+        )
+        self.plant_conf["battery_nominal_energy_capacity_list"] = self._broadcast_battery_param(
+            "battery_nominal_energy_capacity_list",
+            self.plant_conf.get("battery_nominal_energy_capacity", 5000),
+        )
+        self.plant_conf["battery_minimum_state_of_charge_list"] = self._broadcast_battery_param(
+            "battery_minimum_state_of_charge_list",
+            self.plant_conf.get("battery_minimum_state_of_charge", 0.3),
+        )
+        self.plant_conf["battery_maximum_state_of_charge_list"] = self._broadcast_battery_param(
+            "battery_maximum_state_of_charge_list",
+            self.plant_conf.get("battery_maximum_state_of_charge", 0.9),
+        )
+        self.plant_conf["battery_target_state_of_charge_list"] = self._broadcast_battery_param(
+            "battery_target_state_of_charge_list",
+            self.plant_conf.get("battery_target_state_of_charge", 0.6),
+        )
+        self.plant_conf["battery_is_dc_coupled_list"] = self._broadcast_battery_param(
+            "battery_is_dc_coupled_list", True,
+        )
+        self.optim_conf["set_nocharge_from_grid_list"] = self._broadcast_optim_param(
+            "set_nocharge_from_grid_list",
+            self.optim_conf.get("set_nocharge_from_grid", False),
+        )
+        self.optim_conf["set_nodischarge_to_grid_list"] = self._broadcast_optim_param(
+            "set_nodischarge_to_grid_list",
+            self.optim_conf.get("set_nodischarge_to_grid", False),
+        )
+        self.logger.debug(
+            f"Multi-battery: {N} batteries, capacities={self.plant_conf['battery_nominal_energy_capacity_list']}"
+        )
 
     def _prepare_power_limit_array(self, limit_value, limit_name, data_length):
         """
@@ -316,17 +403,19 @@ class Optimization:
         vars_dict["D"] = cp.Variable(n, boolean=True, name="D")
         vars_dict["E"] = cp.Variable(n, boolean=True, name="E")
 
-        # Battery power variables
+        # Battery power variables (per-battery)
         if self.optim_conf["set_use_battery"]:
-            vars_dict["p_sto_pos"] = cp.Variable(n, nonneg=True, name="p_sto_pos")
-            constraints.append(
-                vars_dict["p_sto_pos"] <= self.plant_conf["battery_discharge_power_max"]
-            )
-
-            vars_dict["p_sto_neg"] = cp.Variable(n, nonpos=True, name="p_sto_neg")
-            constraints.append(
-                vars_dict["p_sto_neg"] >= -np.abs(self.plant_conf["battery_charge_power_max"])
-            )
+            num_batt = self.num_batteries
+            for b in range(num_batt):
+                dis_max = self.plant_conf["battery_discharge_power_max_list"][b]
+                chg_max = self.plant_conf["battery_charge_power_max_list"][b]
+                vars_dict[f"p_sto_pos_{b}"] = cp.Variable(n, nonneg=True, name=f"p_sto_pos_{b}")
+                constraints.append(vars_dict[f"p_sto_pos_{b}"] <= dis_max)
+                vars_dict[f"p_sto_neg_{b}"] = cp.Variable(n, nonpos=True, name=f"p_sto_neg_{b}")
+                constraints.append(vars_dict[f"p_sto_neg_{b}"] >= -np.abs(chg_max))
+            # Aggregate aliases for power balance
+            vars_dict["p_sto_pos"] = sum(vars_dict[f"p_sto_pos_{b}"] for b in range(num_batt))
+            vars_dict["p_sto_neg"] = sum(vars_dict[f"p_sto_neg_{b}"] for b in range(num_batt))
         else:
             # Create dummy zero variables to preserve logic structure without conditional checks everywhere
             vars_dict["p_sto_pos"] = cp.Variable(n, name="p_sto_pos_dummy")
@@ -422,10 +511,8 @@ class Optimization:
                 # Maximize SC
                 objective_terms.append(scale * cp.sum(cp.multiply(unit_load_cost, SC)))
 
-        # Battery Cycle Cost Penalty
+        # Battery Cycle Cost Penalty (summed over all batteries)
         if self.optim_conf["set_use_battery"]:
-            # p_sto_neg is negative. -weight*p_sto_neg is a positive penalty value.
-            # We subtract this positive penalty from the maximization objective.
             weight_dis = self.optim_conf["weight_battery_discharge"]
             weight_chg = self.optim_conf["weight_battery_charge"]
 
@@ -435,10 +522,13 @@ class Optimization:
             if isinstance(weight_chg, (list, np.ndarray)) and len(weight_chg) > self.num_timesteps:
                 weight_chg = weight_chg[: self.num_timesteps]
 
-            cycle_cost = cp.multiply(np.array(weight_dis), p_sto_pos) - cp.multiply(
-                np.array(weight_chg), p_sto_neg
-            )
-            objective_terms.append(-scale * cp.sum(cycle_cost))
+            for b in range(self.num_batteries):
+                p_pos_b = self.vars[f"p_sto_pos_{b}"]
+                p_neg_b = self.vars[f"p_sto_neg_{b}"]
+                cycle_cost = cp.multiply(np.array(weight_dis), p_pos_b) - cp.multiply(
+                    np.array(weight_chg), p_neg_b
+                )
+                objective_terms.append(-scale * cp.sum(cycle_cost))
 
         # Deferrable Load Startup Penalties
         if (
@@ -470,6 +560,14 @@ class Optimization:
         # Sum all terms to create the final objective expression
         return cp.Maximize(cp.sum(objective_terms))
 
+    def _get_battery_group_sums(self, group_indices):
+        """Sum per-battery variables for a group of battery indices."""
+        if not group_indices:
+            return 0, 0
+        pos = sum(self.vars[f"p_sto_pos_{b}"] for b in group_indices)
+        neg = sum(self.vars[f"p_sto_neg_{b}"] for b in group_indices)
+        return pos, neg
+
     def _add_main_power_balance_constraints(self, constraints):
         """Add the main power balance constraints (Vectorized)."""
         # Retrieve variables
@@ -478,8 +576,6 @@ class Optimization:
         p_grid_neg = self.vars["p_grid_neg"]
         p_grid_pos = self.vars["p_grid_pos"]
         p_pv_curtailment = self.vars["p_pv_curtailment"]
-        p_sto_pos = self.vars["p_sto_pos"]
-        p_sto_neg = self.vars["p_sto_neg"]
         D = self.vars["D"]
 
         # Retrieve parameters
@@ -487,7 +583,6 @@ class Optimization:
         p_load = self.param_load_forecast
 
         # Prepare Time-Varying Limits
-        # We re-calculate them here to ensure we use the correct time-varying limits
         n = self.num_timesteps
         max_power_from_grid_arr = self._prepare_power_limit_array(
             self.plant_conf.get("maximum_power_from_grid", 9000), "maximum_power_from_grid", n
@@ -496,10 +591,26 @@ class Optimization:
             self.plant_conf.get("maximum_power_to_grid", 9000), "maximum_power_to_grid", n
         )
 
+        # Multi-battery: split into DC-coupled and AC-coupled groups
+        num_batt = self.num_batteries
+        if num_batt > 0:
+            dc_coupled = self.plant_conf.get("battery_is_dc_coupled_list", [True] * num_batt)
+            dc_indices = [b for b in range(num_batt) if dc_coupled[b]]
+            ac_indices = [b for b in range(num_batt) if not dc_coupled[b]]
+        else:
+            dc_indices = []
+            ac_indices = []
+
+        ac_sto_pos, ac_sto_neg = self._get_battery_group_sums(ac_indices)
+        all_sto_pos = self.vars["p_sto_pos"]
+        all_sto_neg = self.vars["p_sto_neg"]
+
         # Main Power Balance Constraints
         if self.plant_conf["inverter_is_hybrid"]:
+            # AC bus: hybrid inverter output + AC-coupled batteries + grid = load + deferrable
             constraints.append(
-                p_hybrid_inverter - p_def_sum - p_load + p_grid_neg + p_grid_pos == 0
+                p_hybrid_inverter + ac_sto_pos + ac_sto_neg
+                - p_def_sum - p_load + p_grid_neg + p_grid_pos == 0
             )
         else:
             if self.plant_conf["compute_curtailment"]:
@@ -510,20 +621,18 @@ class Optimization:
                     - p_load
                     + p_grid_neg
                     + p_grid_pos
-                    + p_sto_pos
-                    + p_sto_neg
+                    + all_sto_pos
+                    + all_sto_neg
                     == 0
                 )
             else:
                 constraints.append(
-                    p_pv - p_def_sum - p_load + p_grid_neg + p_grid_pos + p_sto_pos + p_sto_neg == 0
+                    p_pv - p_def_sum - p_load + p_grid_neg + p_grid_pos
+                    + all_sto_pos + all_sto_neg == 0
                 )
 
         # Grid Constraints (Vectorized with Time-Varying Limits)
-        # p_grid_pos <= max_from_grid[t] * D[t]
         constraints.append(p_grid_pos <= cp.multiply(max_power_from_grid_arr, D))
-
-        # -p_grid_neg <= max_to_grid[t] * (1 - D[t])
         constraints.append(-p_grid_neg <= cp.multiply(max_power_to_grid_arr, (1 - D)))
 
     def _add_hybrid_inverter_constraints(self, constraints, inv_stress_conf):
@@ -595,12 +704,17 @@ class Optimization:
         self.vars["is_dc_sourcing"] = is_dc_sourcing
 
         # Power Balance Constraints (Vectorized)
+        # DC bus: only DC-coupled batteries
+        num_batt = self.num_batteries
+        dc_coupled = self.plant_conf.get("battery_is_dc_coupled_list", [True] * max(num_batt, 1))
+        dc_indices = [b for b in range(num_batt) if dc_coupled[b]]
+        dc_sto_pos, dc_sto_neg = self._get_battery_group_sums(dc_indices)
 
         # DC Bus Balance
         if self.plant_conf["compute_curtailment"]:
-            e_dc_balance = (p_pv - p_pv_curtailment + p_sto_pos + p_sto_neg) - (p_dc_ac - p_ac_dc)
+            e_dc_balance = (p_pv - p_pv_curtailment + dc_sto_pos + dc_sto_neg) - (p_dc_ac - p_ac_dc)
         else:
-            e_dc_balance = (p_pv + p_sto_pos + p_sto_neg) - (p_dc_ac - p_ac_dc)
+            e_dc_balance = (p_pv + dc_sto_pos + dc_sto_neg) - (p_dc_ac - p_ac_dc)
 
         constraints.append(e_dc_balance == 0)
 
@@ -628,97 +742,105 @@ class Optimization:
                 seg_params,
             )
 
-    def _add_battery_constraints(self, constraints, batt_stress_conf):
-        """Add all battery-related constraints (Vectorized)."""
+    def _add_battery_constraints(self, constraints, batt_stress_conf,
+                                batt_start_timestep=None, batt_end_timestep=None):
+        """Add all battery-related constraints (Vectorized, per-battery)."""
         if not self.optim_conf["set_use_battery"]:
             return
 
-        p_sto_pos = self.vars["p_sto_pos"]
-        p_sto_neg = self.vars["p_sto_neg"]
+        num_batt = self.num_batteries
         p_grid_neg = self.vars["p_grid_neg"]
-        E = self.vars["E"]  # Binary: 1=Discharge, 0=Charge
         p_pv = self.param_pv_forecast
+        n = self.num_timesteps
 
-        # Parameters (Scalars)
-        soc_init = self.param_soc_init
-        soc_final = self.param_soc_final
+        # Default availability windows
+        if batt_start_timestep is None:
+            batt_start_timestep = [0] * num_batt
+        if batt_end_timestep is None:
+            batt_end_timestep = [0] * num_batt
+        # Pad to num_batt
+        batt_start_timestep = list(batt_start_timestep) + [0] * (num_batt - len(batt_start_timestep))
+        batt_end_timestep = list(batt_end_timestep) + [0] * (num_batt - len(batt_end_timestep))
 
-        # Constants
-        cap = self.plant_conf["battery_nominal_energy_capacity"]
-        eff_dis = self.plant_conf["battery_discharge_efficiency"]
-        eff_chg = self.plant_conf["battery_charge_efficiency"]
-        max_dis = self.plant_conf["battery_discharge_power_max"]
-        max_chg = self.plant_conf["battery_charge_power_max"]  # This is usually positive in config
-
-        # Grid Interaction Constraints
-
-        # No charge from grid: Charging power (neg) + PV must be positive (net surplus)
-        if self.optim_conf["set_nocharge_from_grid"]:
-            constraints.append(p_sto_neg + p_pv >= 0)
-
-        # No discharge to grid: Grid Export (neg) + PV must be positive
-        if self.optim_conf["set_nodischarge_to_grid"]:
-            constraints.append(p_grid_neg + p_pv >= 0)
-
-        # Dynamic Power Limits (Ramp Rate)
-        if self.optim_conf["set_battery_dynamic"]:
-            # Use slicing for vectorized ramp constraints: var[t+1] - var[t]
-            # p_sto_pos ramp
-            ramp_up_limit = self.time_step * self.optim_conf["battery_dynamic_max"] * max_dis
-            ramp_down_limit = self.time_step * self.optim_conf["battery_dynamic_min"] * max_dis
-
-            diff_pos = p_sto_pos[1:] - p_sto_pos[:-1]
-            constraints.append(diff_pos <= ramp_up_limit)
-            constraints.append(diff_pos >= ramp_down_limit)
-
-            # p_sto_neg ramp (Note: p_sto_neg is negative, max_chg is positive magnitude)
-            ramp_up_limit_neg = self.time_step * self.optim_conf["battery_dynamic_max"] * max_chg
-            ramp_down_limit_neg = self.time_step * self.optim_conf["battery_dynamic_min"] * max_chg
-
-            diff_neg = p_sto_neg[1:] - p_sto_neg[:-1]
-            constraints.append(diff_neg <= ramp_up_limit_neg)
-            constraints.append(diff_neg >= ramp_down_limit_neg)
-
-        # Power & Binary Constraints
-        # Discharge limit based on binary E
-        constraints.append(p_sto_pos <= eff_dis * max_dis * E)
-
-        # Charge limit based on binary E (1-E)
-        # p_sto_neg >= -1/eff * max * (1-E)  --> (p_sto_neg is negative)
-        constraints.append(p_sto_neg >= -(1 / eff_chg) * max_chg * (1 - E))
-
-        # SOC Constraints (Vectorized Accumulation)
-
-        # Calculate Energy Change per timestep (kWh)
-        # Energy out = p_sto_pos / eff_dis
-        # Energy in  = p_sto_neg * eff_chg  (p_sto_neg is negative, so this adds negative energy)
-        power_flow = (p_sto_pos * (1 / eff_dis)) + (p_sto_neg * eff_chg)
-        energy_change = power_flow * self.time_step
-
-        # Calculate Cumulative Energy used/added
-        cumulative_energy = cp.cumsum(energy_change)
-
-        # SOC State (kWh) at every timestep t
-        # SOC_t = SOC_init - Cumulative_Change
-        # (Subtracting because positive flow is Discharge/Depletion)
-        current_stored_energy = (soc_init * cap) - cumulative_energy
-
-        # Min/Max SOC Bounds for all t
-        constraints.append(
-            current_stored_energy <= self.plant_conf["battery_maximum_state_of_charge"] * cap
+        nocharge_list = self.optim_conf.get(
+            "set_nocharge_from_grid_list", [self.optim_conf.get("set_nocharge_from_grid", False)] * num_batt
         )
-        constraints.append(
-            current_stored_energy >= self.plant_conf["battery_minimum_state_of_charge"] * cap
+        nodischarge_list = self.optim_conf.get(
+            "set_nodischarge_to_grid_list", [self.optim_conf.get("set_nodischarge_to_grid", False)] * num_batt
         )
 
-        # Final SOC Constraint
-        # The total energy change over the whole horizon must match init -> final
-        # Total Sum of power flow * dt == (Init - Final) * Capacity
-        total_energy_change = cp.sum(energy_change)
-        constraints.append(total_energy_change == (soc_init - soc_final) * cap)
+        # Per-battery binary E variable (charge/discharge direction)
+        for b in range(num_batt):
+            E_b = cp.Variable(n, boolean=True, name=f"E_{b}")
+            self.vars[f"E_{b}"] = E_b
 
-        # Stress Cost
+        for b in range(num_batt):
+            p_pos = self.vars[f"p_sto_pos_{b}"]
+            p_neg = self.vars[f"p_sto_neg_{b}"]
+            E_b = self.vars[f"E_{b}"]
+
+            soc_init_b = self.param_soc_init_list[b]
+            soc_final_b = self.param_soc_final_list[b]
+
+            cap = self.plant_conf["battery_nominal_energy_capacity_list"][b]
+            eff_dis = self.plant_conf["battery_discharge_efficiency_list"][b]
+            eff_chg = self.plant_conf["battery_charge_efficiency_list"][b]
+            max_dis = self.plant_conf["battery_discharge_power_max_list"][b]
+            max_chg = self.plant_conf["battery_charge_power_max_list"][b]
+
+            # Grid Interaction Constraints (per-battery)
+            if b < len(nocharge_list) and nocharge_list[b]:
+                constraints.append(p_neg + p_pv >= 0)
+            if b < len(nodischarge_list) and nodischarge_list[b]:
+                constraints.append(p_grid_neg + p_pv >= 0)
+
+            # Dynamic Power Limits (Ramp Rate)
+            if self.optim_conf.get("set_battery_dynamic", False):
+                ramp_up = self.time_step * self.optim_conf["battery_dynamic_max"] * max_dis
+                ramp_down = self.time_step * self.optim_conf["battery_dynamic_min"] * max_dis
+                diff_pos = p_pos[1:] - p_pos[:-1]
+                constraints.append(diff_pos <= ramp_up)
+                constraints.append(diff_pos >= ramp_down)
+
+                ramp_up_neg = self.time_step * self.optim_conf["battery_dynamic_max"] * max_chg
+                ramp_down_neg = self.time_step * self.optim_conf["battery_dynamic_min"] * max_chg
+                diff_neg = p_neg[1:] - p_neg[:-1]
+                constraints.append(diff_neg <= ramp_up_neg)
+                constraints.append(diff_neg >= ramp_down_neg)
+
+            # Power & Binary Constraints
+            constraints.append(p_pos <= eff_dis * max_dis * E_b)
+            constraints.append(p_neg >= -(1 / eff_chg) * max_chg * (1 - E_b))
+
+            # SOC Constraints (Vectorized Accumulation)
+            power_flow = (p_pos * (1 / eff_dis)) + (p_neg * eff_chg)
+            energy_change = power_flow * self.time_step
+            cumulative_energy = cp.cumsum(energy_change)
+            current_stored_energy = (soc_init_b * cap) - cumulative_energy
+
+            soc_max = self.plant_conf["battery_maximum_state_of_charge_list"][b]
+            soc_min = self.plant_conf["battery_minimum_state_of_charge_list"][b]
+            constraints.append(current_stored_energy <= soc_max * cap)
+            constraints.append(current_stored_energy >= soc_min * cap)
+
+            # Final SOC Constraint
+            total_energy_change = cp.sum(energy_change)
+            constraints.append(total_energy_change == (soc_init_b - soc_final_b) * cap)
+
+            # Battery Availability Window
+            batt_start = batt_start_timestep[b]
+            batt_end = batt_end_timestep[b]
+            if not (batt_start == 0 and batt_end == 0):
+                end = n if batt_end == 0 else min(batt_end, n)
+                outside = [i for i in range(n) if i < batt_start or i >= end]
+                if outside:
+                    constraints.append(p_pos[outside] == 0)
+                    constraints.append(p_neg[outside] == 0)
+
+        # Stress Cost (applied to total battery power)
         if batt_stress_conf and batt_stress_conf["active"]:
+            total_pos = self.vars["p_sto_pos"]
+            total_neg = self.vars["p_sto_neg"]
             seg_params = self._build_stress_segments(
                 batt_stress_conf["max_power"],
                 batt_stress_conf["unit_cost"],
@@ -726,7 +848,7 @@ class Optimization:
             )
             self._add_stress_constraints(
                 constraints,
-                p_sto_pos - p_sto_neg,  # Total power magnitude expression
+                total_pos - total_neg,
                 batt_stress_conf["vars"],
                 seg_params,
             )
@@ -1313,21 +1435,29 @@ class Optimization:
             opt_tp[f"P_deferrable{k}"] = p_def_k
             p_def_sum += p_def_k
 
-        # Battery Results
+        # Battery Results (per-battery)
         if self.optim_conf["set_use_battery"]:
-            p_sto_pos = get_val(self.vars["p_sto_pos"])
-            p_sto_neg = get_val(self.vars["p_sto_neg"])
-            opt_tp["P_batt"] = p_sto_pos + p_sto_neg
+            num_batt = self.num_batteries
+            for b in range(num_batt):
+                p_pos_b = get_val(self.vars[f"p_sto_pos_{b}"])
+                p_neg_b = get_val(self.vars[f"p_sto_neg_{b}"])
+                opt_tp[f"P_batt{b}"] = p_pos_b + p_neg_b
 
-            # Reconstruct SOC
-            eff_dis = self.plant_conf["battery_discharge_efficiency"]
-            eff_chg = self.plant_conf["battery_charge_efficiency"]
-            cap = self.plant_conf["battery_nominal_energy_capacity"]
+                # Reconstruct SOC per battery
+                eff_dis = self.plant_conf["battery_discharge_efficiency_list"][b]
+                eff_chg = self.plant_conf["battery_charge_efficiency_list"][b]
+                cap = self.plant_conf["battery_nominal_energy_capacity_list"][b]
 
-            power_flow = (p_sto_pos * (1 / eff_dis)) + (p_sto_neg * eff_chg)
-            energy_change = power_flow * self.time_step
-            cumulative_change = np.cumsum(energy_change)
-            opt_tp["SOC_opt"] = soc_init - (cumulative_change / cap)
+                power_flow = (p_pos_b * (1 / eff_dis)) + (p_neg_b * eff_chg)
+                energy_change = power_flow * self.time_step
+                cumulative_change = np.cumsum(energy_change)
+                soc_init_b = soc_init[b] if isinstance(soc_init, list) else soc_init
+                opt_tp[f"SOC_opt{b}"] = soc_init_b - (cumulative_change / cap)
+
+            # Backwards-compatible aliases for single battery
+            if num_batt == 1:
+                opt_tp["P_batt"] = opt_tp["P_batt0"]
+                opt_tp["SOC_opt"] = opt_tp["SOC_opt0"]
 
             # Stress Cost
             if "batt_stress_cost" in self.vars:
@@ -1435,14 +1565,16 @@ class Optimization:
         p_load: np.array,
         unit_load_cost: np.array,
         unit_prod_price: np.array,
-        soc_init: float | None = None,
-        soc_final: float | None = None,
+        soc_init: float | list | None = None,
+        soc_final: float | list | None = None,
         def_total_hours: list | None = None,
         def_total_timestep: list | None = None,
         def_start_timestep: list | None = None,
         def_end_timestep: list | None = None,
         def_init_temp: list | None = None,
         min_power_of_deferrable_loads: list | None = None,
+        batt_start_timestep: list | None = None,
+        batt_end_timestep: list | None = None,
         debug: bool | None = False,
     ) -> pd.DataFrame:
         r"""
@@ -1475,20 +1607,34 @@ class Optimization:
             # Force problem rebuild
             self.prob = None
 
-        # Data Validation & Defaults
+        # Data Validation & Defaults (multi-battery aware)
         if self.optim_conf["set_use_battery"]:
+            num_batt = self.num_batteries
+            target_list = self.plant_conf.get(
+                "battery_target_state_of_charge_list",
+                [self.plant_conf.get("battery_target_state_of_charge", 0.6)] * num_batt,
+            )
+
+            # Expand soc_init to per-battery list
             if soc_init is None:
                 if soc_final is not None:
                     soc_init = soc_final
                 else:
-                    soc_init = self.plant_conf["battery_target_state_of_charge"]
+                    soc_init = list(target_list)
+            if isinstance(soc_init, (int, float)):
+                soc_init = [float(soc_init)] * num_batt
+
+            # Expand soc_final to per-battery list
             if soc_final is None:
                 if soc_init is not None:
-                    soc_final = soc_init
+                    soc_final = list(soc_init)
                 else:
-                    soc_final = self.plant_conf["battery_target_state_of_charge"]
+                    soc_final = list(target_list)
+            if isinstance(soc_final, (int, float)):
+                soc_final = [float(soc_final)] * num_batt
+
             self.logger.debug(
-                f"Battery usage enabled. Initial SOC: {soc_init}, Final SOC: {soc_final}"
+                f"Battery usage enabled. {num_batt} batteries. SOC init: {soc_init}, SOC final: {soc_final}"
             )
 
         # Pad deferrable load lists
@@ -1534,8 +1680,13 @@ class Optimization:
         self.param_prod_price.value = unit_prod_price
 
         if self.optim_conf["set_use_battery"]:
-            self.param_soc_init.value = soc_init
-            self.param_soc_final.value = soc_final
+            # Set per-battery SOC parameters
+            for b in range(self.num_batteries):
+                self.param_soc_init_list[b].value = soc_init[b]
+                self.param_soc_final_list[b].value = soc_final[b]
+            # Legacy scalar params (use first battery for backwards compat)
+            self.param_soc_init.value = soc_init[0]
+            self.param_soc_final.value = soc_final[0]
 
         # Build Problem (Lazy Construction)
         if self.prob is None:
@@ -1550,8 +1701,8 @@ class Optimization:
 
             if self.optim_conf["set_use_battery"]:
                 p_batt_max = max(
-                    self.plant_conf.get("battery_discharge_power_max", 0),
-                    self.plant_conf.get("battery_charge_power_max", 0),
+                    max(self.plant_conf.get("battery_discharge_power_max_list", [0])),
+                    max(self.plant_conf.get("battery_charge_power_max_list", [0])),
                 )
                 batt_stress_conf = self._setup_stress_cost(
                     "battery_stress_cost", p_batt_max, "battery"
@@ -1573,7 +1724,8 @@ class Optimization:
             # Add Constraints
             self._add_main_power_balance_constraints(constraints)
             self._add_hybrid_inverter_constraints(constraints, inv_stress_conf)
-            self._add_battery_constraints(constraints, batt_stress_conf)
+            self._add_battery_constraints(constraints, batt_stress_conf,
+                                         batt_start_timestep, batt_end_timestep)
 
             if self.plant_conf["compute_curtailment"]:
                 constraints.append(self.vars["p_pv_curtailment"] <= self.param_pv_forecast)
@@ -1695,7 +1847,8 @@ class Optimization:
             if inv_stress_conf:
                 self._add_hybrid_inverter_constraints(constraints_relaxed, inv_stress_conf)
             if batt_stress_conf:
-                self._add_battery_constraints(constraints_relaxed, batt_stress_conf)
+                self._add_battery_constraints(constraints_relaxed, batt_stress_conf,
+                                              batt_start_timestep, batt_end_timestep)
 
             if self.plant_conf["compute_curtailment"]:
                 constraints_relaxed.append(self.vars["p_pv_curtailment"] <= self.param_pv_forecast)
@@ -1906,12 +2059,14 @@ class Optimization:
         p_pv: pd.Series,
         p_load: pd.Series,
         prediction_horizon: int,
-        soc_init: float | None = None,
-        soc_final: float | None = None,
+        soc_init: float | list | None = None,
+        soc_final: float | list | None = None,
         def_total_hours: list | None = None,
         def_total_timestep: list | None = None,
         def_start_timestep: list | None = None,
         def_end_timestep: list | None = None,
+        batt_start_timestep: list | None = None,
+        batt_end_timestep: list | None = None,
     ) -> pd.DataFrame:
         r"""
         Perform a naive approach to a Model Predictive Control (MPC). \
@@ -1989,6 +2144,8 @@ class Optimization:
             def_total_timestep=def_total_timestep,
             def_start_timestep=def_start_timestep,
             def_end_timestep=def_end_timestep,
+            batt_start_timestep=batt_start_timestep,
+            batt_end_timestep=batt_end_timestep,
         )
         return self.opt_res
 

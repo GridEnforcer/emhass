@@ -1140,6 +1140,8 @@ async def naive_mpc_optim(
     def_end_timestep = input_data_dict["params"]["optim_conf"][
         "end_timesteps_of_each_deferrable_load"
     ]
+    batt_start_timestep = input_data_dict["params"]["passed_data"].get("batt_start_timestep", None)
+    batt_end_timestep = input_data_dict["params"]["passed_data"].get("batt_end_timestep", None)
     opt_res_naive_mpc = input_data_dict["opt"].perform_naive_mpc_optim(
         df_input_data_dayahead,
         input_data_dict["p_pv_forecast"],
@@ -1151,6 +1153,8 @@ async def naive_mpc_optim(
         def_total_timestep,
         def_start_timestep,
         def_end_timestep,
+        batt_start_timestep,
+        batt_end_timestep,
     )
     # Save CSV file for publish_data
     if save_data_to_file:
@@ -1873,39 +1877,74 @@ async def _publish_thermal_loads(ctx: PublishContext, opt_res_latest: pd.DataFra
 
 
 async def _publish_battery_data(ctx: PublishContext, opt_res_latest: pd.DataFrame) -> list[str]:
-    """Publish Battery Power and SOC."""
+    """Publish Battery Power and SOC (multi-battery aware)."""
     cols = []
     if not ctx.opt.optim_conf["set_use_battery"]:
         return cols
-    if "P_batt" not in opt_res_latest.columns:
-        ctx.logger.error("P_batt was not found in results DataFrame.")
-        return cols
-    # Power
-    custom_batt = ctx.params["passed_data"]["custom_batt_forecast_id"]
-    await ctx.rh.post_data(
-        opt_res_latest["P_batt"],
-        ctx.idx,
-        custom_batt["entity_id"],
-        "power",
-        custom_batt["unit_of_measurement"],
-        custom_batt["friendly_name"],
-        type_var="batt",
-        **ctx.common_kwargs,
-    )
-    cols.append("P_batt")
-    # SOC
-    custom_soc = ctx.params["passed_data"]["custom_batt_soc_forecast_id"]
-    await ctx.rh.post_data(
-        opt_res_latest["SOC_opt"] * 100,
-        ctx.idx,
-        custom_soc["entity_id"],
-        "battery",
-        custom_soc["unit_of_measurement"],
-        custom_soc["friendly_name"],
-        type_var="SOC",
-        **ctx.common_kwargs,
-    )
-    cols.append("SOC_opt")
+
+    num_batteries = getattr(ctx.opt, "num_batteries", 1)
+    custom_batt_ids = ctx.params["passed_data"]["custom_batt_forecast_id"]
+    custom_soc_ids = ctx.params["passed_data"]["custom_batt_soc_forecast_id"]
+
+    for b in range(num_batteries):
+        batt_col = f"P_batt{b}"
+        soc_col = f"SOC_opt{b}"
+
+        # Fall back to legacy column names for single battery
+        if batt_col not in opt_res_latest.columns and "P_batt" in opt_res_latest.columns:
+            batt_col = "P_batt"
+            soc_col = "SOC_opt"
+
+        if batt_col not in opt_res_latest.columns:
+            ctx.logger.error(f"{batt_col} was not found in results DataFrame.")
+            continue
+
+        # Get entity config: support both list-of-dicts and single dict
+        if isinstance(custom_batt_ids, list):
+            if b < len(custom_batt_ids):
+                custom_batt = custom_batt_ids[b]
+            else:
+                ctx.logger.warning(f"No custom_batt_forecast_id for battery {b}")
+                continue
+        else:
+            custom_batt = custom_batt_ids
+
+        if isinstance(custom_soc_ids, list):
+            if b < len(custom_soc_ids):
+                custom_soc = custom_soc_ids[b]
+            else:
+                ctx.logger.warning(f"No custom_batt_soc_forecast_id for battery {b}")
+                continue
+        else:
+            custom_soc = custom_soc_ids
+
+        # Power
+        await ctx.rh.post_data(
+            opt_res_latest[batt_col],
+            ctx.idx,
+            custom_batt["entity_id"],
+            "power",
+            custom_batt["unit_of_measurement"],
+            custom_batt["friendly_name"],
+            type_var="batt",
+            **ctx.common_kwargs,
+        )
+        cols.append(batt_col)
+
+        # SOC
+        if soc_col in opt_res_latest.columns:
+            await ctx.rh.post_data(
+                opt_res_latest[soc_col] * 100,
+                ctx.idx,
+                custom_soc["entity_id"],
+                "battery",
+                custom_soc["unit_of_measurement"],
+                custom_soc["friendly_name"],
+                type_var="SOC",
+                **ctx.common_kwargs,
+            )
+            cols.append(soc_col)
+
     return cols
 
 

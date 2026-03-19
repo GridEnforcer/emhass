@@ -927,36 +927,40 @@ async def treat_runtimeparams(
             else:
                 prediction_horizon = runtimeparams["prediction_horizon"]
             params["passed_data"]["prediction_horizon"] = prediction_horizon
+
+            # Multi-battery aware SOC init/final handling
+            num_batteries = params["optim_conf"].get("number_of_batteries", 1 if params["optim_conf"].get("set_use_battery") else 0)
+            soc_target = params["plant_conf"]["battery_target_state_of_charge"]
+            soc_min = params["plant_conf"]["battery_minimum_state_of_charge"]
+            soc_max = params["plant_conf"]["battery_maximum_state_of_charge"]
+
+            # soc_init: accept scalar or list, broadcast, clamp per battery
             if "soc_init" not in runtimeparams.keys():
-                soc_init = params["plant_conf"]["battery_target_state_of_charge"]
+                soc_init = soc_target
             else:
                 soc_init = runtimeparams["soc_init"]
-            if soc_init < params["plant_conf"]["battery_minimum_state_of_charge"]:
-                logger.warning(
-                    f"Passed soc_init={soc_init} is lower than soc_min={params['plant_conf']['battery_minimum_state_of_charge']}, setting soc_init=soc_min"
-                )
-                soc_init = params["plant_conf"]["battery_minimum_state_of_charge"]
-            if soc_init > params["plant_conf"]["battery_maximum_state_of_charge"]:
-                logger.warning(
-                    f"Passed soc_init={soc_init} is greater than soc_max={params['plant_conf']['battery_maximum_state_of_charge']}, setting soc_init=soc_max"
-                )
-                soc_init = params["plant_conf"]["battery_maximum_state_of_charge"]
+            if isinstance(soc_init, (int, float)):
+                soc_init = max(soc_min, min(soc_max, soc_init))
+            elif isinstance(soc_init, list):
+                soc_init = [max(soc_min, min(soc_max, v)) for v in soc_init]
             params["passed_data"]["soc_init"] = soc_init
+
+            # soc_final: accept scalar or list, broadcast, clamp per battery
             if "soc_final" not in runtimeparams.keys():
-                soc_final = params["plant_conf"]["battery_target_state_of_charge"]
+                soc_final = soc_target
             else:
                 soc_final = runtimeparams["soc_final"]
-            if soc_final < params["plant_conf"]["battery_minimum_state_of_charge"]:
-                logger.warning(
-                    f"Passed soc_final={soc_final} is lower than soc_min={params['plant_conf']['battery_minimum_state_of_charge']}, setting soc_final=soc_min"
-                )
-                soc_final = params["plant_conf"]["battery_minimum_state_of_charge"]
-            if soc_final > params["plant_conf"]["battery_maximum_state_of_charge"]:
-                logger.warning(
-                    f"Passed soc_final={soc_final} is greater than soc_max={params['plant_conf']['battery_maximum_state_of_charge']}, setting soc_final=soc_max"
-                )
-                soc_final = params["plant_conf"]["battery_maximum_state_of_charge"]
+            if isinstance(soc_final, (int, float)):
+                soc_final = max(soc_min, min(soc_max, soc_final))
+            elif isinstance(soc_final, list):
+                soc_final = [max(soc_min, min(soc_max, v)) for v in soc_final]
             params["passed_data"]["soc_final"] = soc_final
+
+            # Battery availability windows
+            if "batt_start_timestep" in runtimeparams:
+                params["passed_data"]["batt_start_timestep"] = runtimeparams["batt_start_timestep"]
+            if "batt_end_timestep" in runtimeparams:
+                params["passed_data"]["batt_end_timestep"] = runtimeparams["batt_end_timestep"]
             if "operating_timesteps_of_each_deferrable_load" in runtimeparams.keys():
                 params["passed_data"]["operating_timesteps_of_each_deferrable_load"] = (
                     runtimeparams["operating_timesteps_of_each_deferrable_load"]
@@ -2155,6 +2159,8 @@ async def build_params(
         "prediction_horizon": None,
         "soc_init": None,
         "soc_final": None,
+        "batt_start_timestep": None,
+        "batt_end_timestep": None,
         "operating_hours_of_each_deferrable_load": None,
         "start_timesteps_of_each_deferrable_load": None,
         "end_timesteps_of_each_deferrable_load": None,
