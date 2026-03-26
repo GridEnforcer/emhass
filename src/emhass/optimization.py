@@ -1641,6 +1641,12 @@ class Optimization:
             if isinstance(soc_final, (int, float)):
                 soc_final = [float(soc_final)] * num_batt
 
+            # Pad short lists to num_batt (fill from target_list)
+            while len(soc_init) < num_batt:
+                soc_init.append(target_list[len(soc_init)])
+            while len(soc_final) < num_batt:
+                soc_final.append(target_list[len(soc_final)])
+
             self.logger.debug(
                 f"Battery usage enabled. {num_batt} batteries. SOC init: {soc_init}, SOC final: {soc_final}"
             )
