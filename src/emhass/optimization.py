@@ -837,6 +837,14 @@ class Optimization:
                     constraints.append(p_pos[outside] == 0)
                     constraints.append(p_neg[outside] == 0)
 
+            # SOC-by-departure constraint
+            # When a departure time is set within the horizon, the battery must
+            # reach soc_final by that timestep (not just at horizon end).
+            if batt_end != 0 and batt_end <= n:
+                constraints.append(
+                    current_stored_energy[batt_end - 1] >= soc_final_b * cap
+                )
+
         # Stress Cost (applied to total battery power)
         if batt_stress_conf and batt_stress_conf["active"]:
             total_pos = self.vars["p_sto_pos"]

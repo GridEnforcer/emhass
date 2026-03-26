@@ -2832,6 +2832,119 @@ class TestOptimization(unittest.IsolatedAsyncioTestCase):
             self.fail(f"Optimization failed with partial NaN data: {e}")
 
 
+    def test_departure_time_soc_constraint(self):
+        """Test that SOC reaches soc_final by departure timestep."""
+        self.plant_conf.update(
+            {
+                "inverter_is_hybrid": False,
+                "compute_curtailment": False,
+                "battery_nominal_energy_capacity": 5000,  # 5kWh
+                "battery_discharge_power_max": 3000,  # 3kW
+                "battery_charge_power_max": 3000,  # 3kW
+                "battery_discharge_efficiency": 1.0,
+                "battery_charge_efficiency": 1.0,
+                "battery_minimum_state_of_charge": 0.0,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_target_state_of_charge": 0.8,
+            }
+        )
+        self.optim_conf.update(
+            {
+                "set_use_battery": True,
+                "set_nocharge_from_grid": False,
+                "operating_hours_of_each_deferrable_load": [0, 0],
+                "load_cost_forecast_method": "csv",
+                "production_price_forecast_method": "csv",
+            }
+        )
+        # 48 periods of 15 min = 12 hours
+        periods = 48
+        dates = pd.date_range(
+            start=pd.Timestamp.now(tz=self.retrieve_hass_conf["time_zone"]),
+            periods=periods,
+            freq=self.retrieve_hass_conf["optimization_time_step"],
+        )
+        df_input = pd.DataFrame(index=dates)
+        df_input["p_pv_forecast"] = 0.0
+        df_input["p_load_forecast"] = 0.0
+        df_input[self.fcst.var_load_cost] = 0.1
+        df_input[self.fcst.var_prod_price] = 0.1
+
+        opt = self.create_optimization()
+        # Departure at timestep 8 (2 hours in), soc_init=0.2, soc_final=0.8
+        opt_res = opt.perform_optimization(
+            df_input,
+            df_input["p_pv_forecast"].values,
+            df_input["p_load_forecast"].values,
+            df_input[opt.var_load_cost].values,
+            df_input[opt.var_prod_price].values,
+            soc_init=0.2,
+            soc_final=0.8,
+            batt_end_timestep=[8],
+        )
+        self.assertEqual(opt.optim_status, "Optimal")
+        # SOC at timestep 8 (index 7, 0-indexed) should be >= 0.8
+        soc_at_departure = opt_res["SOC_opt"].iloc[7]
+        self.assertGreaterEqual(soc_at_departure, 0.8 - 0.01)
+        # Power should be zero after departure (timesteps 8..47)
+        p_batt_after = opt_res["P_batt"].iloc[8:]
+        self.assertTrue((p_batt_after.abs() < 1.0).all(),
+                        f"Battery power should be ~0 after departure, got: {p_batt_after.values}")
+
+    def test_departure_time_no_departure_unchanged(self):
+        """Test that without departure time, soc_final is enforced at horizon end only."""
+        self.plant_conf.update(
+            {
+                "inverter_is_hybrid": False,
+                "compute_curtailment": False,
+                "battery_nominal_energy_capacity": 5000,
+                "battery_discharge_power_max": 3000,
+                "battery_charge_power_max": 3000,
+                "battery_discharge_efficiency": 1.0,
+                "battery_charge_efficiency": 1.0,
+                "battery_minimum_state_of_charge": 0.0,
+                "battery_maximum_state_of_charge": 1.0,
+                "battery_target_state_of_charge": 0.5,
+            }
+        )
+        self.optim_conf.update(
+            {
+                "set_use_battery": True,
+                "set_nocharge_from_grid": False,
+                "operating_hours_of_each_deferrable_load": [0, 0],
+                "load_cost_forecast_method": "csv",
+                "production_price_forecast_method": "csv",
+            }
+        )
+        periods = 16
+        dates = pd.date_range(
+            start=pd.Timestamp.now(tz=self.retrieve_hass_conf["time_zone"]),
+            periods=periods,
+            freq=self.retrieve_hass_conf["optimization_time_step"],
+        )
+        df_input = pd.DataFrame(index=dates)
+        df_input["p_pv_forecast"] = 0.0
+        df_input["p_load_forecast"] = 0.0
+        df_input[self.fcst.var_load_cost] = 0.1
+        df_input[self.fcst.var_prod_price] = 0.1
+
+        opt = self.create_optimization()
+        # No departure time — soc_final at horizon end
+        opt_res = opt.perform_optimization(
+            df_input,
+            df_input["p_pv_forecast"].values,
+            df_input["p_load_forecast"].values,
+            df_input[opt.var_load_cost].values,
+            df_input[opt.var_prod_price].values,
+            soc_init=0.2,
+            soc_final=0.5,
+        )
+        self.assertEqual(opt.optim_status, "Optimal")
+        # Final SOC at horizon end should match soc_final
+        soc_final = opt_res["SOC_opt"].iloc[-1]
+        self.assertAlmostEqual(soc_final, 0.5, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()
     ch.close()
