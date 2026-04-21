@@ -1256,6 +1256,69 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         # Verify it fell back to default or kept original value (depending on logic, usually implies no change)
         self.assertEqual(plant_conf_out["maximum_power_from_grid"], default_from_grid)
 
+    async def test_treat_runtimeparams_routes_battery_list_params(self):
+        """Per-battery `_list` params from runtimeparams must reach plant_conf.
+
+        Regression: GridEnforcer plugin was emitting
+        `battery_is_dc_coupled_list=[False]` for the AC-side EV charger
+        but EMHASS silently dropped it because the key had no
+        associations.csv entry, so the solver defaulted to `[True]`
+        and routed the Tesla discharge through the DC bus of the hybrid
+        inverter. See associations.csv bottom block for the fix.
+        """
+        params = await TestUtils.get_test_params()
+        params["retrieve_hass_conf"]["optimization_time_step"] = pd.to_timedelta(
+            params["retrieve_hass_conf"]["optimization_time_step"], "minutes"
+        )
+        params["optim_conf"]["delta_forecast_daily"] = pd.Timedelta(
+            days=params["optim_conf"]["delta_forecast_daily"]
+        )
+        retrieve_hass_conf = params["retrieve_hass_conf"]
+        optim_conf = params["optim_conf"]
+        plant_conf = params["plant_conf"]
+
+        runtimeparams = json.dumps(
+            {
+                "battery_is_dc_coupled_list": [True, False],
+                "battery_charge_efficiency_list": [0.95, 0.90],
+                "battery_discharge_efficiency_list": [0.95, 0.88],
+                "battery_minimum_state_of_charge_list": [0.2, 0.1],
+                "battery_maximum_state_of_charge_list": [0.9, 0.8],
+                "battery_target_state_of_charge_list": [0.6, 0.5],
+                "battery_nominal_energy_capacity_list": [10000, 24000],
+                "battery_charge_power_max_list": [5000, 11000],
+                "battery_discharge_power_max_list": [5000, 11000],
+                "weight_battery_charge_list": [0.0, 0.5],
+                "weight_battery_discharge_list": [0.1, 0.7],
+                "set_nocharge_from_grid_list": [False, True],
+                "set_nodischarge_to_grid_list": [False, True],
+            }
+        )
+        _, _, optim_conf_out, plant_conf_out = await treat_runtimeparams(
+            runtimeparams,
+            deepcopy(params),
+            retrieve_hass_conf,
+            optim_conf,
+            plant_conf,
+            "dayahead-optim",
+            logger,
+            emhass_conf,
+        )
+
+        self.assertListEqual(plant_conf_out["battery_is_dc_coupled_list"], [True, False])
+        self.assertListEqual(plant_conf_out["battery_charge_efficiency_list"], [0.95, 0.90])
+        self.assertListEqual(plant_conf_out["battery_discharge_efficiency_list"], [0.95, 0.88])
+        self.assertListEqual(plant_conf_out["battery_minimum_state_of_charge_list"], [0.2, 0.1])
+        self.assertListEqual(plant_conf_out["battery_maximum_state_of_charge_list"], [0.9, 0.8])
+        self.assertListEqual(plant_conf_out["battery_target_state_of_charge_list"], [0.6, 0.5])
+        self.assertListEqual(plant_conf_out["battery_nominal_energy_capacity_list"], [10000, 24000])
+        self.assertListEqual(plant_conf_out["battery_charge_power_max_list"], [5000, 11000])
+        self.assertListEqual(plant_conf_out["battery_discharge_power_max_list"], [5000, 11000])
+        self.assertListEqual(optim_conf_out["weight_battery_charge_list"], [0.0, 0.5])
+        self.assertListEqual(optim_conf_out["weight_battery_discharge_list"], [0.1, 0.7])
+        self.assertListEqual(optim_conf_out["set_nocharge_from_grid_list"], [False, True])
+        self.assertListEqual(optim_conf_out["set_nodischarge_to_grid_list"], [False, True])
+
 
 class TestHeatingDemand(unittest.TestCase):
     def test_calculate_heating_demand_basic(self):
