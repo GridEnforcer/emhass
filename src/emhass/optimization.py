@@ -144,7 +144,24 @@ class Optimization:
 
         # Broadcast scalar battery params to per-battery lists
         if self.num_batteries > 0:
+            # TEMP: verify runtimeparams routing of _list keys to plant_conf.
+            self.logger.info(
+                "DIAG plant_conf before broadcast: "
+                "is_dc_coupled_list=%s, charge_eff_list=%s, "
+                "min_soc_list=%s, max_soc_list=%s, num_batteries=%s",
+                self.plant_conf.get("battery_is_dc_coupled_list"),
+                self.plant_conf.get("battery_charge_efficiency_list"),
+                self.plant_conf.get("battery_minimum_state_of_charge_list"),
+                self.plant_conf.get("battery_maximum_state_of_charge_list"),
+                self.num_batteries,
+            )
             self._init_battery_param_lists()
+            self.logger.info(
+                "DIAG plant_conf after broadcast: "
+                "is_dc_coupled_list=%s, charge_eff_list=%s",
+                self.plant_conf.get("battery_is_dc_coupled_list"),
+                self.plant_conf.get("battery_charge_efficiency_list"),
+            )
 
         # Define Parameters (Data holders)
         # These will be updated in perform_optimization without rebuilding the problem
