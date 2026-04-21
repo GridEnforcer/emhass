@@ -733,6 +733,7 @@ async def set_input_data_dict(
         costfun,
         emhass_conf,
         logger,
+        num_timesteps=len(fcst.forecast_dates),
     )
     # Create SetupContext
     ctx = SetupContext(
@@ -1125,7 +1126,10 @@ async def naive_mpc_optim(
     if isinstance(df_input_data_dayahead, bool) and not df_input_data_dayahead:
         return False
     # The specifics params for the MPC at runtime
-    prediction_horizon = input_data_dict["params"]["passed_data"]["prediction_horizon"]
+    prediction_horizon = min(
+        input_data_dict["params"]["passed_data"]["prediction_horizon"],
+        len(df_input_data_dayahead),
+    )
     soc_init = input_data_dict["params"]["passed_data"]["soc_init"]
     soc_final = input_data_dict["params"]["passed_data"]["soc_final"]
     def_total_hours = input_data_dict["params"]["optim_conf"].get(
