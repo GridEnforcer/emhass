@@ -1367,7 +1367,11 @@ def get_yaml_parse(params: str | dict, logger: logging.Logger) -> tuple[dict, di
     return retrieve_hass_conf, optim_conf, plant_conf
 
 
-def get_injection_dict(df: pd.DataFrame, plot_size: int | None = 1366) -> dict:
+def get_injection_dict(
+    df: pd.DataFrame,
+    plot_size: int | None = 1366,
+    battery_display_names: list[str] | None = None,
+) -> dict:
     """
     Build a dictionary with graphs and tables for the webui.
 
@@ -1375,10 +1379,22 @@ def get_injection_dict(df: pd.DataFrame, plot_size: int | None = 1366) -> dict:
     :type df: pd.DataFrame
     :param plot_size: Size of the plot figure in pixels, defaults to 1366
     :type plot_size: Optional[int], optional
+    :param battery_display_names: Optional per-battery friendly names to substitute
+        for the raw ``P_batt{b}`` / ``SOC_opt{b}`` column names in plots and tables.
+    :type battery_display_names: Optional[list[str]], optional
     :return: A dictionary containing the graphs and tables in html format
     :rtype: dict
 
     """
+    if battery_display_names:
+        rename_map: dict[str, str] = {}
+        for b, name in enumerate(battery_display_names):
+            if not name:
+                continue
+            rename_map[f"P_batt{b}"] = f"P_{name}"
+            rename_map[f"SOC_opt{b}"] = f"SOC_{name}"
+        if rename_map:
+            df = df.rename(columns=rename_map)
     cols_p = [i for i in df.columns.to_list() if "P_" in i]
     # Let's round the data in the DF
     if "optim_status" in df.columns:
@@ -1406,11 +1422,20 @@ def get_injection_dict(df: pd.DataFrame, plot_size: int | None = 1366) -> dict:
     )
     fig_0.update_layout(xaxis_title="Timestamp", yaxis_title="System powers (W)")
     image_path_0 = fig_0.to_html(full_html=False, default_width="75%")
-    # Figure 1: Battery SOC (Optional)
+    # Figure 1: Battery SOC (Optional). Plot any SOC_opt* columns (per-battery) or
+    # renamed SOC_<display_name> columns if display names were applied above.
     image_path_1 = None
-    if "SOC_opt" in df.columns.to_list():
+    soc_cols = [
+        c
+        for c in df.columns.to_list()
+        if c == "SOC_opt" or c.startswith("SOC_opt") or (battery_display_names and c.startswith("SOC_"))
+    ]
+    # Drop the aggregated SOC_opt alias if per-battery columns are also present
+    if len(soc_cols) > 1 and "SOC_opt" in soc_cols:
+        soc_cols.remove("SOC_opt")
+    if soc_cols:
         fig_1 = px.line(
-            df["SOC_opt"],
+            df[soc_cols],
             title="Battery state of charge schedule after optimization results",
             template="presentation",
             line_shape="hv",

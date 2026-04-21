@@ -1054,6 +1054,30 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Thermal loads temperature schedule", injection_dict["figure_thermal"])
         self.assertIn("Temperature (&deg;C)", injection_dict["figure_thermal"])
 
+    def test_get_injection_dict_battery_display_names(self):
+        # Per-battery power and SOC columns
+        df = self.df.copy()
+        df["P_batt0"] = 100
+        df["P_batt1"] = 200
+        df["SOC_opt0"] = 0.5
+        df["SOC_opt1"] = 0.6
+        # Without display names: raw column names appear in figures
+        injection_dict = utils.get_injection_dict(df.copy())
+        self.assertIn("P_batt0", injection_dict["figure_0"])
+        self.assertIn("P_batt1", injection_dict["figure_0"])
+        # With display names: renamed columns appear, raw names are gone
+        injection_dict = utils.get_injection_dict(
+            df.copy(), battery_display_names=["House", "Car"]
+        )
+        self.assertIn("P_House", injection_dict["figure_0"])
+        self.assertIn("P_Car", injection_dict["figure_0"])
+        self.assertNotIn("P_batt0", injection_dict["figure_0"])
+        self.assertNotIn("P_batt1", injection_dict["figure_0"])
+        # SOC plot picks up the renamed per-battery columns
+        self.assertIn("figure_1", injection_dict)
+        self.assertIn("SOC_House", injection_dict["figure_1"])
+        self.assertIn("SOC_Car", injection_dict["figure_1"])
+
     def test_get_injection_dict_without_thermal(self):
         # Ensure no thermal columns
         cols = [c for c in self.df.columns if "heater" not in c]

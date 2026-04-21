@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased (gridenforcer fork)
+- HTML overview applies `battery_display_name_list` to rename `P_batt{b}` / `SOC_opt{b}` plot/table columns and now plots per-battery SOC when multi-battery is used.
 - Per-battery cycle-cost weights: `weight_battery_charge_list` / `weight_battery_discharge_list` broadcast in `_init_battery_param_lists` and consumed per-battery in the objective. Scalar `weight_battery_charge` / `weight_battery_discharge` remain backwards compatible.
 - Backport upstream DST-boundary fixes (carposio, `bda3474` + `60a7d15`): `_load_opt_res_latest` tz_converts to local timezone; `Optimization.__init__` accepts optional `num_timesteps` override; `set_input_data_dict` passes `len(fcst.forecast_dates)`; `naive_mpc_optim` clamps `prediction_horizon` to data length. Prevents CVXPY shape mismatches when forecast windows cross DST boundaries.
 - Backport upstream continual-publish timeout fix (davidusb-geek, `0a4d896`): use Quart `app.add_background_task` instead of raw `threading.Thread`.

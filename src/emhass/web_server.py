@@ -516,7 +516,12 @@ async def _handle_action_dispatch(
         action_str = f" >> Performing {action_name}..."
         logger.info(action_str)
         opt_res = await optim_actions[action_name](input_data_dict, logger)
-        injection_dict = get_injection_dict(opt_res)
+        battery_display_names = input_data_dict["opt"].optim_conf.get(
+            "battery_display_name_list"
+        )
+        injection_dict = get_injection_dict(
+            opt_res, battery_display_names=battery_display_names
+        )
         await _save_injection_dict(injection_dict, emhass_conf["data_path"])
         return f"EMHASS >> Action {action_name} executed... \n", 201
 
