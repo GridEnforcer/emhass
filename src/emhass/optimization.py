@@ -229,6 +229,14 @@ class Optimization:
             "set_nodischarge_to_grid_list",
             self.optim_conf.get("set_nodischarge_to_grid", False),
         )
+        self.optim_conf["weight_battery_charge_list"] = self._broadcast_optim_param(
+            "weight_battery_charge_list",
+            self.optim_conf.get("weight_battery_charge", 0.0),
+        )
+        self.optim_conf["weight_battery_discharge_list"] = self._broadcast_optim_param(
+            "weight_battery_discharge_list",
+            self.optim_conf.get("weight_battery_discharge", 0.0),
+        )
         self.logger.debug(
             f"Multi-battery: {N} batteries, capacities={self.plant_conf['battery_nominal_energy_capacity_list']}"
         )
@@ -511,22 +519,25 @@ class Optimization:
                 # Maximize SC
                 objective_terms.append(scale * cp.sum(cp.multiply(unit_load_cost, SC)))
 
-        # Battery Cycle Cost Penalty (summed over all batteries)
+        # Battery Cycle Cost Penalty (per-battery weights)
         if self.optim_conf["set_use_battery"]:
-            weight_dis = self.optim_conf["weight_battery_discharge"]
-            weight_chg = self.optim_conf["weight_battery_charge"]
-
-            # Handle time-varying weights with slicing for resized horizons
-            if isinstance(weight_dis, (list, np.ndarray)) and len(weight_dis) > self.num_timesteps:
-                weight_dis = weight_dis[: self.num_timesteps]
-            if isinstance(weight_chg, (list, np.ndarray)) and len(weight_chg) > self.num_timesteps:
-                weight_chg = weight_chg[: self.num_timesteps]
+            weight_dis_list = self.optim_conf["weight_battery_discharge_list"]
+            weight_chg_list = self.optim_conf["weight_battery_charge_list"]
 
             for b in range(self.num_batteries):
+                weight_dis_b = weight_dis_list[b]
+                weight_chg_b = weight_chg_list[b]
+
+                # Handle time-varying weights with slicing for resized horizons
+                if isinstance(weight_dis_b, (list, np.ndarray)) and len(weight_dis_b) > self.num_timesteps:
+                    weight_dis_b = weight_dis_b[: self.num_timesteps]
+                if isinstance(weight_chg_b, (list, np.ndarray)) and len(weight_chg_b) > self.num_timesteps:
+                    weight_chg_b = weight_chg_b[: self.num_timesteps]
+
                 p_pos_b = self.vars[f"p_sto_pos_{b}"]
                 p_neg_b = self.vars[f"p_sto_neg_{b}"]
-                cycle_cost = cp.multiply(np.array(weight_dis), p_pos_b) - cp.multiply(
-                    np.array(weight_chg), p_neg_b
+                cycle_cost = cp.multiply(np.array(weight_dis_b), p_pos_b) - cp.multiply(
+                    np.array(weight_chg_b), p_neg_b
                 )
                 objective_terms.append(-scale * cp.sum(cycle_cost))
 

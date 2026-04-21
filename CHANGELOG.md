@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased (gridenforcer fork)
+- Per-battery cycle-cost weights: `weight_battery_charge_list` / `weight_battery_discharge_list` broadcast in `_init_battery_param_lists` and consumed per-battery in the objective. Scalar `weight_battery_charge` / `weight_battery_discharge` remain backwards compatible.
+
 ## 0.16.2 - 2026-01-29
 ### Improvement
 - Added support for a thermal inertia parameter for the basic thermal model

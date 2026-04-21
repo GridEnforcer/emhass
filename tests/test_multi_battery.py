@@ -294,6 +294,64 @@ class TestMultiBattery(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(result["SOC_opt0"].iloc[0], 0.6, delta=0.15)
         self.assertAlmostEqual(result["SOC_opt1"].iloc[0], 0.6, delta=0.15)
 
+    async def test_per_battery_weights(self):
+        """Per-battery weight lists pass through to optim_conf and solver runs."""
+        oc = copy.deepcopy(self.optim_conf)
+        oc["set_use_battery"] = True
+        oc["number_of_batteries"] = 2
+        oc["weight_battery_discharge_list"] = [0.0, 10.0]
+        oc["weight_battery_charge_list"] = [0.0, 5.0]
+        pc = copy.deepcopy(self.plant_conf)
+        pc["battery_discharge_power_max_list"] = [1000, 1000]
+        pc["battery_charge_power_max_list"] = [1000, 1000]
+        pc["battery_nominal_energy_capacity_list"] = [5000, 5000]
+        pc["battery_discharge_efficiency_list"] = [0.95, 0.95]
+        pc["battery_charge_efficiency_list"] = [0.95, 0.95]
+        pc["battery_minimum_state_of_charge_list"] = [0.2, 0.2]
+        pc["battery_maximum_state_of_charge_list"] = [0.9, 0.9]
+
+        opt = self._make_opt(optim_conf=oc, plant_conf=pc)
+        # Per-battery lists installed verbatim
+        self.assertEqual(opt.optim_conf["weight_battery_discharge_list"], [0.0, 10.0])
+        self.assertEqual(opt.optim_conf["weight_battery_charge_list"], [0.0, 5.0])
+
+        df = self._prepare_mpc_data(horizon=10)
+        p_pv = df.iloc[:, 0].values
+        p_load = df.iloc[:, 1].values
+        unit_cost = df[self.fcst.var_load_cost].values
+        unit_price = df[self.fcst.var_prod_price].values
+
+        result = opt.perform_optimization(
+            df, p_pv, p_load, unit_cost, unit_price,
+            soc_init=[0.8, 0.8], soc_final=[0.5, 0.5],
+        )
+
+        # Sanity: both batteries present and the problem converged
+        self.assertIn("P_batt0", result.columns)
+        self.assertIn("P_batt1", result.columns)
+        self.assertIn("ptimal", result["optim_status"].iloc[0])
+
+    async def test_scalar_weight_broadcast(self):
+        """Scalar weight_battery_discharge should broadcast to every battery."""
+        oc = copy.deepcopy(self.optim_conf)
+        oc["set_use_battery"] = True
+        oc["number_of_batteries"] = 2
+        oc["weight_battery_discharge"] = 0.3
+        oc["weight_battery_charge"] = 0.2
+        pc = copy.deepcopy(self.plant_conf)
+        pc["battery_discharge_power_max_list"] = [1000, 1000]
+        pc["battery_charge_power_max_list"] = [1000, 1000]
+        pc["battery_nominal_energy_capacity_list"] = [5000, 5000]
+        pc["battery_discharge_efficiency_list"] = [0.95, 0.95]
+        pc["battery_charge_efficiency_list"] = [0.95, 0.95]
+        pc["battery_minimum_state_of_charge_list"] = [0.2, 0.2]
+        pc["battery_maximum_state_of_charge_list"] = [0.9, 0.9]
+
+        opt = self._make_opt(optim_conf=oc, plant_conf=pc)
+        # Broadcast happens in __init__ via _init_battery_param_lists.
+        self.assertEqual(opt.optim_conf["weight_battery_discharge_list"], [0.3, 0.3])
+        self.assertEqual(opt.optim_conf["weight_battery_charge_list"], [0.2, 0.2])
+
 
 if __name__ == "__main__":
     unittest.main()
