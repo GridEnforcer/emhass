@@ -1086,6 +1086,16 @@ async def treat_runtimeparams(
                 runtimeparams["historic_days_to_retrieve"]
             )
 
+        # Honor use_websocket toggle from runtimeparams. Lets callers
+        # request the WebSocket+statistics data path per-call without
+        # editing the YAML config — useful for ML training calls that
+        # need long history (LTSS), while keeping the REST path for
+        # short windows. See gridenforcer_core-9nz.
+        if "use_websocket" in runtimeparams:
+            params["retrieve_hass_conf"]["use_websocket"] = bool(
+                runtimeparams["use_websocket"]
+            )
+
         # Treat passed data for forecast model fit/predict/tune at runtime
         if (
             params["passed_data"].get("historic_days_to_retrieve", None) is not None

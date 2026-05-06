@@ -468,14 +468,34 @@ class RetrieveHass:
 
         # Try to get statistics data (which contains the actual historical data)
         try:
-            # Get statistics data with 5-minute period for good resolution
+            # Choose the statistics period adaptively based on window size:
+            # - "5minute": high resolution, but HA only retains short-term
+            #   statistics for ~10 days (independent of recorder.purge_keep_days).
+            # - "hour": lower resolution, retained for years as long-term
+            #   statistics (LTSS) — independent of purge_keep_days.
+            # For ML training windows > 10 days the 5-minute statistics are
+            # mostly empty for older days; hourly LTSS unlocks the full
+            # window without growing the recorder DB. (gridenforcer_core-9nz)
+            # Use days_list (pandas Timestamps, tz-uniform) to compute the
+            # window, avoiding tz-naive/aware subtraction issues that hit
+            # the (end_time = datetime.now()) variant on tz-aware data.
+            window_days = (
+                (days_list.max() - days_list.min()).total_seconds() / 86400.0 + 1
+            )
+            period = "hour" if window_days > 10 else "5minute"
+            self.logger.info(
+                "WebSocket stats fetch: window=%.1f days, period=%s",
+                window_days,
+                period,
+            )
+
             t0 = time.time()
             stats_data = await asyncio.wait_for(
                 self._client.get_statistics(
                     start_time=start_time,
                     end_time=end_time,
                     statistic_ids=var_list,
-                    period="5minute",
+                    period=period,
                 ),
                 timeout=30.0,
             )

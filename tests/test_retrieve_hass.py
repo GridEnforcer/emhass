@@ -568,6 +568,48 @@ class TestRetrieveHass(unittest.IsolatedAsyncioTestCase):
         mock_get_ws.side_effect = None
         self.rh.use_websocket = False
 
+    @patch("emhass.retrieve_hass.get_websocket_client", new_callable=AsyncMock)
+    async def test_get_data_websocket_period_adapts_to_window(self, mock_get_ws):
+        """Long ML training windows must use period='hour' (LTSS retained
+        for years) instead of period='5minute' (HA short-term stats kept
+        only ~10 days). gridenforcer_core-9nz."""
+        var_list = ["sensor.power_load"]
+        self.rh.use_websocket = True
+
+        mock_client = MagicMock()
+        mock_get_ws.return_value = mock_client
+        mock_client.get_statistics = AsyncMock(
+            return_value={"sensor.power_load": [
+                {"start": pd.Timestamp("2024-01-01", tz="UTC").isoformat(),
+                 "mean": 1000.0},
+            ]}
+        )
+
+        # Short window (2 days) → 5-minute resolution.
+        short_days = pd.date_range(
+            start="2024-01-01", periods=2, freq="D", tz="UTC"
+        )
+        await self.rh.get_data_websocket(short_days, var_list)
+        period_arg = mock_client.get_statistics.call_args.kwargs.get("period")
+        self.assertEqual(
+            period_arg, "5minute",
+            "Short windows should keep the 5-minute resolution"
+        )
+
+        # Long window (30 days) → hourly statistics (LTSS).
+        mock_client.get_statistics.reset_mock()
+        long_days = pd.date_range(
+            start="2024-01-01", periods=30, freq="D", tz="UTC"
+        )
+        await self.rh.get_data_websocket(long_days, var_list)
+        period_arg = mock_client.get_statistics.call_args.kwargs.get("period")
+        self.assertEqual(
+            period_arg, "hour",
+            "Windows >10 days must switch to hourly LTSS for retention"
+        )
+
+        self.rh.use_websocket = False
+
     async def test_get_data_rest_api_errors(self):
         days_list = pd.date_range(start="2024-01-01", periods=1, freq="D", tz="UTC")
         var_list = ["sensor.test"]

@@ -236,6 +236,49 @@ class TestMLForecasterAsync(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(passed_data.get("split_date_delta"), "48h")
 
 
+    async def test_treat_runtimeparams_use_websocket_passthrough(self):
+        """`use_websocket` from runtimeparams must propagate into
+        retrieve_hass_conf so the WebSocket+statistics data path is
+        selected per-call. Lets ML training opt into LTSS-backed
+        history without modifying the YAML config
+        (gridenforcer_core-9nz)."""
+        runtime_input = {
+            "model_type": "load_forecast",
+            "var_model": "sensor.load",
+            "sklearn_model": "RandomForestRegressor",
+            "num_lags": 24,
+            "use_websocket": True,
+        }
+        runtimeparams_json = orjson.dumps(runtime_input).decode("utf-8")
+        params = await TestMLForecasterAsync.get_test_params()
+        if "optimization_time_step" in params["retrieve_hass_conf"]:
+            params["retrieve_hass_conf"]["optimization_time_step"] = pd.to_timedelta(
+                params["retrieve_hass_conf"]["optimization_time_step"], "minutes"
+            )
+        if "delta_forecast_daily" in params["optim_conf"]:
+            params["optim_conf"]["delta_forecast_daily"] = pd.to_timedelta(
+                params["optim_conf"]["delta_forecast_daily"], "days"
+            )
+        # Default in YAML config — must be overridden by the runtimeparam.
+        params["retrieve_hass_conf"]["use_websocket"] = False
+
+        params_json_res, _, _, _ = await utils.treat_runtimeparams(
+            runtimeparams_json,
+            params,
+            {},  # retrieve_hass_conf
+            {},  # optim_conf
+            {},  # plant_conf
+            "forecast-model-fit",
+            logger,
+            emhass_conf,
+        )
+        params_result = orjson.loads(params_json_res)
+        self.assertTrue(
+            params_result["retrieve_hass_conf"].get("use_websocket"),
+            "use_websocket runtimeparam must override the YAML config value",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
     ch.close()
