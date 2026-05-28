@@ -1319,6 +1319,87 @@ class TestUtils(unittest.IsolatedAsyncioTestCase):
         self.assertListEqual(optim_conf_out["set_nocharge_from_grid_list"], [False, True])
         self.assertListEqual(optim_conf_out["set_nodischarge_to_grid_list"], [False, True])
 
+    async def test_soc_init_clamped_per_battery_not_scalar_min(self):
+        """soc_init list must be clamped to each battery's OWN min/max,
+        not the scalar battery_minimum_state_of_charge (= battery 0).
+
+        Field 2026-05-28 (gridenforcer): battery[0] = house battery,
+        min_soc 0.25; battery[1] = V2G EV at 18 % SoC with its own
+        min_soc relaxed to 0.18. The EV's soc_init=0.18 was being
+        clamped UP to the house's 0.25 because the list comprehension
+        used the scalar soc_min, so the EV's planned SOC trajectory
+        started at 25 % instead of the real 18 %.
+        """
+        params = await TestUtils.get_test_params()
+        params["retrieve_hass_conf"]["optimization_time_step"] = pd.to_timedelta(
+            params["retrieve_hass_conf"]["optimization_time_step"], "minutes"
+        )
+        params["optim_conf"]["delta_forecast_daily"] = pd.Timedelta(
+            days=params["optim_conf"]["delta_forecast_daily"]
+        )
+        retrieve_hass_conf = params["retrieve_hass_conf"]
+        optim_conf = params["optim_conf"]
+        plant_conf = params["plant_conf"]
+        # Scalar min (battery 0 / house) is 0.25 — the value the EV must
+        # NOT inherit.
+        plant_conf["battery_minimum_state_of_charge"] = 0.25
+        plant_conf["battery_maximum_state_of_charge"] = 0.95
+
+        runtimeparams = json.dumps(
+            {
+                "number_of_batteries": 2,
+                "battery_minimum_state_of_charge_list": [0.25, 0.18],
+                "battery_maximum_state_of_charge_list": [0.95, 1.0],
+                # EV (battery 1) genuinely at 18 %, house (battery 0) at 86 %
+                "soc_init": [0.86, 0.18],
+                "soc_final": [0.86, 0.18],
+            }
+        )
+        params_out, _, _, _ = await treat_runtimeparams(
+            runtimeparams,
+            deepcopy(params),
+            retrieve_hass_conf,
+            optim_conf,
+            plant_conf,
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
+        params_out = orjson.loads(params_out)
+        # The EV's soc_init must stay at 0.18, NOT be clamped up to 0.25.
+        self.assertEqual(params_out["passed_data"]["soc_init"], [0.86, 0.18])
+        self.assertEqual(params_out["passed_data"]["soc_final"], [0.86, 0.18])
+
+    async def test_soc_init_scalar_still_uses_scalar_min(self):
+        """Single-battery (scalar soc_init) path is unchanged — clamps
+        to the scalar min/max."""
+        params = await TestUtils.get_test_params()
+        params["retrieve_hass_conf"]["optimization_time_step"] = pd.to_timedelta(
+            params["retrieve_hass_conf"]["optimization_time_step"], "minutes"
+        )
+        params["optim_conf"]["delta_forecast_daily"] = pd.Timedelta(
+            days=params["optim_conf"]["delta_forecast_daily"]
+        )
+        retrieve_hass_conf = params["retrieve_hass_conf"]
+        optim_conf = params["optim_conf"]
+        plant_conf = params["plant_conf"]
+        plant_conf["battery_minimum_state_of_charge"] = 0.30
+
+        runtimeparams = json.dumps({"soc_init": 0.10, "soc_final": 0.10})
+        params_out, _, _, _ = await treat_runtimeparams(
+            runtimeparams,
+            deepcopy(params),
+            retrieve_hass_conf,
+            optim_conf,
+            plant_conf,
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
+        params_out = orjson.loads(params_out)
+        # Scalar 0.10 clamped UP to scalar min 0.30 (unchanged behavior)
+        self.assertEqual(params_out["passed_data"]["soc_init"], 0.30)
+
 
 class TestHeatingDemand(unittest.TestCase):
     def test_calculate_heating_demand_basic(self):

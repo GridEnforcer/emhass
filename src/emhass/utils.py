@@ -934,6 +934,33 @@ async def treat_runtimeparams(
             soc_min = params["plant_conf"]["battery_minimum_state_of_charge"]
             soc_max = params["plant_conf"]["battery_maximum_state_of_charge"]
 
+            # Per-battery min/max lists when the caller supplies them
+            # (multi-battery installs). Each list element must be clamped
+            # to ITS OWN battery's floor/ceiling — using the scalar
+            # soc_min/soc_max for every element clamps every battery to
+            # battery[0]'s bounds. Field 2026-05-28: a V2G EV at 18 %
+            # SoC was clamped UP to the house battery's 25 % min because
+            # this list comprehension used the scalar soc_min, so the
+            # EV's planned SOC trajectory started at 25 % instead of 18 %.
+            soc_min_list = runtimeparams.get("battery_minimum_state_of_charge_list")
+            soc_max_list = runtimeparams.get("battery_maximum_state_of_charge_list")
+
+            def _clamp_per_battery(values):
+                out = []
+                for b, v in enumerate(values):
+                    lo = (
+                        soc_min_list[b]
+                        if isinstance(soc_min_list, list) and b < len(soc_min_list)
+                        else soc_min
+                    )
+                    hi = (
+                        soc_max_list[b]
+                        if isinstance(soc_max_list, list) and b < len(soc_max_list)
+                        else soc_max
+                    )
+                    out.append(max(lo, min(hi, v)))
+                return out
+
             # soc_init: accept scalar or list, broadcast, clamp per battery
             if "soc_init" not in runtimeparams.keys():
                 soc_init = soc_target
@@ -942,7 +969,7 @@ async def treat_runtimeparams(
             if isinstance(soc_init, (int, float)):
                 soc_init = max(soc_min, min(soc_max, soc_init))
             elif isinstance(soc_init, list):
-                soc_init = [max(soc_min, min(soc_max, v)) for v in soc_init]
+                soc_init = _clamp_per_battery(soc_init)
             params["passed_data"]["soc_init"] = soc_init
 
             # soc_final: accept scalar or list, broadcast, clamp per battery
@@ -953,7 +980,7 @@ async def treat_runtimeparams(
             if isinstance(soc_final, (int, float)):
                 soc_final = max(soc_min, min(soc_max, soc_final))
             elif isinstance(soc_final, list):
-                soc_final = [max(soc_min, min(soc_max, v)) for v in soc_final]
+                soc_final = _clamp_per_battery(soc_final)
             params["passed_data"]["soc_final"] = soc_final
 
             # Battery availability windows
