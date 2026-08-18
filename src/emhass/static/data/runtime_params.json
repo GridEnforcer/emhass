@@ -65,6 +65,11 @@
       "friendly_name": "Battery availability window end",
       "Description": "Per-battery availability window end as a 0-based timestep index (exclusive), one entry per battery; 0 means the window extends to the horizon end. Outside its window a battery is pinned to zero power (EV departed / not yet plugged in). Naive-MPC only. GridEnforcer fork extension.",
       "input": "array.int"
+    },
+    "battery_initial_active": {
+      "friendly_name": "Battery session currently active",
+      "Description": "Per-battery 0/1 flags: 1 means a charge/discharge session is already active entering the horizon, so the startup penalty (set_battery_startup_penalty) does not charge for continuing it - only for new starts. Naive-MPC only. GridEnforcer fork extension (ge-jeh).",
+      "input": "array.int"
     }
   },
   "Cost function": {

@@ -1793,6 +1793,12 @@ async def treat_runtimeparams(
             params["passed_data"]["batt_end_timestep"] = runtimeparams.get(
                 "batt_end_timestep", None
             )
+            # Current per-battery session state for the startup penalty
+            # (GridEnforcer ge-jeh): 1 = a session is already active, so
+            # continuing it is free. Runtime-only, like the windows above.
+            params["passed_data"]["battery_initial_active"] = runtimeparams.get(
+                "battery_initial_active", None
+            )
             if "operating_timesteps_of_each_deferrable_load" in runtimeparams.keys():
                 params["passed_data"]["operating_timesteps_of_each_deferrable_load"] = (
                     runtimeparams["operating_timesteps_of_each_deferrable_load"]
@@ -1848,6 +1854,7 @@ async def treat_runtimeparams(
             # plug-in/departure timeline.
             params["passed_data"]["batt_start_timestep"] = None
             params["passed_data"]["batt_end_timestep"] = None
+            params["passed_data"]["battery_initial_active"] = None
 
         # Parsing the thermal model parameters
         # Load the default config
@@ -3520,6 +3527,7 @@ async def build_params(
         "capacity_charge_window": None,
         "batt_start_timestep": None,
         "batt_end_timestep": None,
+        "battery_initial_active": None,
         "operating_hours_of_each_deferrable_load": None,
         "start_timesteps_of_each_deferrable_load": None,
         "end_timesteps_of_each_deferrable_load": None,
@@ -3709,6 +3717,7 @@ BATT_ARRAY_PARAMS_PLANT_CONF: dict[str, bool | int | float] = {
     "battery_stress_cost": 0.0,
 }
 BATT_ARRAY_PARAMS_OPTIM_CONF: dict[str, bool | int | float] = {
+    "set_battery_startup_penalty": 0.0,
     "battery_soc_deficit_threshold": 0.4,
     "battery_soc_deficit_cost": 0.0,
     "battery_soc_surplus_threshold": 0.9,

@@ -308,6 +308,9 @@ class Optimization:
         # Per-battery availability-window power ceilings (GridEnforcer fork)
         self._init_battery_availability_params()
 
+        # Per-battery current-session-state params (GridEnforcer ge-jeh)
+        self._init_battery_startup_params()
+
         # SOC recovery parameters
         self._init_soc_recovery_params()
 
@@ -529,6 +532,45 @@ class Optimization:
                 )
             self._batt_avail_masks[k] = mask
         self._refresh_battery_availability_values()
+
+    def _battery_startup_penalty_list(self) -> list[float]:
+        """Per-battery startup penalties (GridEnforcer ge-jeh:
+        ``set_battery_startup_penalty``, scalar or per-battery list,
+        default 0.0 = disabled). Mirrors set_deferrable_startup_penalty:
+        each 0-to-active transition costs
+        ``penalty * battery_charge_power_max * unit_load_cost * timestep``
+        (via the shared ``scale`` factor), i.e. penalty 1.0 = the energy
+        cost of one timestep at nominal power per session start."""
+        raw = self.optim_conf.get("set_battery_startup_penalty", 0.0)
+        if isinstance(raw, (list, tuple)):
+            vals = [float(v or 0.0) for v in raw][: self.n_batt]
+            vals += [0.0] * (self.n_batt - len(vals))
+        else:
+            vals = [float(raw or 0.0)] * self.n_batt
+        return vals
+
+    def _battery_startup_penalties_enabled(self) -> bool:
+        return self.optim_conf.get("set_use_battery", False) and any(
+            v > 0 for v in self._battery_startup_penalty_list()
+        )
+
+    def _init_battery_startup_params(self) -> None:
+        """Scalar per-battery Parameters for the receding-horizon current
+        session state (analog of ``param_def_current_state``): 1.0 = a
+        session is already active entering the horizon, so continuing it
+        is free and only NEW starts are penalized. Horizon-independent
+        scalars - no resize handling needed."""
+        self.param_batt_current_active = [
+            cp.Parameter(name=f"batt_current_active_{k}") for k in range(self.n_batt)
+        ]
+        for param in self.param_batt_current_active:
+            param.value = 0.0
+
+    def _apply_battery_initial_active(self, initial_active: list | None) -> None:
+        vals = list(initial_active or [])
+        vals += [0] * (self.n_batt - len(vals))
+        for k in range(self.n_batt):
+            self.param_batt_current_active[k].value = 1.0 if vals[k] else 0.0
 
     def _init_deferrable_load_params(self) -> None:
         """
@@ -1804,6 +1846,20 @@ class Optimization:
             # (#610): each battery's own target relaxes independently; an aggregate
             # slack would let one battery's overshoot cancel another's undershoot
             # at zero cost.
+            # Battery startup-penalty activity/start variables (GridEnforcer
+            # ge-jeh). Opt-in: only created when any battery has a nonzero
+            # set_battery_startup_penalty, so the default problem is
+            # byte-identical (no extra binaries). The gate is static config,
+            # part of the OptimizationCache key - a change rebuilds.
+            if self._battery_startup_penalties_enabled():
+                vars_dict["batt_active"] = [
+                    cp.Variable(n, boolean=True, name=f"batt_active_{k}")
+                    for k in range(self.n_batt)
+                ]
+                vars_dict["batt_start"] = [
+                    cp.Variable(n, nonneg=True, name=f"batt_start_{k}")
+                    for k in range(self.n_batt)
+                ]
             vars_dict["soc_final_under"] = [
                 cp.Variable(nonneg=True, name=f"soc_final_under_{k}") for k in range(self.n_batt)
             ]
@@ -2020,6 +2076,28 @@ class Optimization:
                     k * cp.sum(p_sto_pos[k] - p_sto_neg[k]) for k in range(len(p_sto_pos))
                 ]
                 objective_terms.append(-BATTERY_TIEBREAK_EPS * cp.sum(sum(tiebreak_terms)))
+
+        # Battery Startup Penalties (GridEnforcer ge-jeh). Deviation from
+        # the deferrable analog: priced on param_load_cost_pos (negative
+        # prices clipped to 0, same rationale as battery_first_penalty) so
+        # a negative-price slot can never REWARD session churn.
+        if self._battery_startup_penalties_enabled():
+            _batt_penalties = self._battery_startup_penalty_list()
+            _batt_nominal = self._batt_list(
+                self.plant_conf, "battery_charge_power_max", default=0
+            )
+            for k in range(self.n_batt):
+                if _batt_penalties[k] > 0:
+                    objective_terms.append(
+                        -scale
+                        * _batt_penalties[k]
+                        * float(_batt_nominal[k] or 0)
+                        * cp.sum(
+                            cp.multiply(
+                                self.vars["batt_start"][k], self.param_load_cost_pos
+                            )
+                        )
+                    )
 
         # Deferrable Load Startup Penalties
         if (
@@ -2455,6 +2533,24 @@ class Optimization:
             eff_chg = eff_chg_list[k]
             max_dis = self.param_battery_discharge_power_max[k]
             max_chg = self.param_battery_charge_power_max[k]  # nonneg cp.Parameter
+
+            # Battery startup penalty machinery (GridEnforcer ge-jeh),
+            # mirroring the deferrable-load pattern: activity binary tied
+            # to nonzero power, start detection against the parameterized
+            # current session state (receding-horizon aware), and the
+            # start-limit cut that keeps `start` tight.
+            if self._battery_startup_penalties_enabled():
+                active_k = self.vars["batt_active"][k]
+                start_k = self.vars["batt_start"][k]
+                p_pos_k = self.vars["p_sto_pos"][k]
+                p_neg_k = self.vars["p_sto_neg"][k]
+                current_active_k = self.param_batt_current_active[k]
+                constraints.append(p_pos_k <= max_dis * active_k)
+                constraints.append(-p_neg_k <= max_chg * active_k)
+                constraints.append(start_k[0] >= active_k[0] - current_active_k)
+                constraints.append(start_k[1:] >= active_k[1:] - active_k[:-1])
+                constraints.append(start_k[0] + current_active_k <= 1)
+                constraints.append(start_k[1:] + active_k[:-1] <= 1)
             soc_init_k = self.param_soc_init[k]
             soc_final_k = self.param_soc_final[k]
             soc_low_recovered_k = self.vars["soc_low_recovered"][k]
@@ -4427,6 +4523,7 @@ class Optimization:
         capacity_charge_window: list | None = None,
         batt_start_timestep: list | None = None,
         batt_end_timestep: list | None = None,
+        battery_initial_active: list | None = None,
         def_total_hours: list | None = None,
         def_total_timestep: list | None = None,
         def_start_timestep: list | None = None,
@@ -4517,6 +4614,8 @@ class Optimization:
             self._apply_battery_availability_windows(
                 batt_start_timestep, batt_end_timestep
             )
+            # Current session state for the startup penalty (ge-jeh).
+            self._apply_battery_initial_active(battery_initial_active)
             soc_init_list = self._normalize_soc_arg(soc_init)
             soc_final_list = self._normalize_soc_arg(soc_final)
             target_list = batt_conf["soc_target"]
@@ -5856,6 +5955,7 @@ class Optimization:
         capacity_charge_window: list | None = None,
         batt_start_timestep: list | None = None,
         batt_end_timestep: list | None = None,
+        battery_initial_active: list | None = None,
         def_total_hours: list | None = None,
         def_total_timestep: list | None = None,
         def_start_timestep: list | None = None,
@@ -5977,6 +6077,7 @@ class Optimization:
             capacity_charge_window=capacity_charge_window,
             batt_start_timestep=batt_start_timestep,
             batt_end_timestep=batt_end_timestep,
+            battery_initial_active=battery_initial_active,
             def_total_hours=def_total_hours,
             def_total_timestep=def_total_timestep,
             def_start_timestep=def_start_timestep,
