@@ -55,6 +55,16 @@
       "input": "array.int",
       "default_value": null,
       "unit": "timesteps"
+    },
+    "batt_start_timestep": {
+      "friendly_name": "Battery availability window start",
+      "Description": "Per-battery availability window start as a 0-based timestep index (inclusive), one entry per battery. Together with batt_end_timestep the battery may only charge/discharge inside [start, end); 0 in both means no window. Naive-MPC only. GridEnforcer fork extension.",
+      "input": "array.int"
+    },
+    "batt_end_timestep": {
+      "friendly_name": "Battery availability window end",
+      "Description": "Per-battery availability window end as a 0-based timestep index (exclusive), one entry per battery; 0 means the window extends to the horizon end. Outside its window a battery is pinned to zero power (EV departed / not yet plugged in). Naive-MPC only. GridEnforcer fork extension.",
+      "input": "array.int"
     }
   },
   "Cost function": {

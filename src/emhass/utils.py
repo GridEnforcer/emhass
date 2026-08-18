@@ -1780,6 +1780,19 @@ async def treat_runtimeparams(
             params["passed_data"]["capacity_charge_window"] = runtimeparams.get(
                 "capacity_charge_window", None
             )
+            # Per-battery availability windows (GridEnforcer fork). Runtime-
+            # only lists of 0-based timestep indices, one entry per battery;
+            # window is [start, end), end == 0 means "to horizon end",
+            # start == end == 0 means no window. Validation/padding happens
+            # in Optimization._apply_battery_availability_windows. Like the
+            # capacity window these change every call, so they are passed_data
+            # only - never structural config (OptimizationCache safety).
+            params["passed_data"]["batt_start_timestep"] = runtimeparams.get(
+                "batt_start_timestep", None
+            )
+            params["passed_data"]["batt_end_timestep"] = runtimeparams.get(
+                "batt_end_timestep", None
+            )
             if "operating_timesteps_of_each_deferrable_load" in runtimeparams.keys():
                 params["passed_data"]["operating_timesteps_of_each_deferrable_load"] = (
                     runtimeparams["operating_timesteps_of_each_deferrable_load"]
@@ -1830,6 +1843,11 @@ async def treat_runtimeparams(
             # Like current_period_peak, the demand-window mask is naive-mpc-only:
             # dayahead/perfect optimizations price the full horizon peak.
             params["passed_data"]["capacity_charge_window"] = None
+            # Battery availability windows are likewise naive-mpc-only
+            # (GridEnforcer fork) - the receding-horizon caller owns the
+            # plug-in/departure timeline.
+            params["passed_data"]["batt_start_timestep"] = None
+            params["passed_data"]["batt_end_timestep"] = None
 
         # Parsing the thermal model parameters
         # Load the default config
@@ -3500,6 +3518,8 @@ async def build_params(
         "soc_target_timestep": None,
         "current_period_peak": None,
         "capacity_charge_window": None,
+        "batt_start_timestep": None,
+        "batt_end_timestep": None,
         "operating_hours_of_each_deferrable_load": None,
         "start_timesteps_of_each_deferrable_load": None,
         "end_timesteps_of_each_deferrable_load": None,

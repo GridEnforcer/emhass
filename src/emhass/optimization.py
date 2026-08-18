@@ -305,6 +305,9 @@ class Optimization:
             self.param_battery_charge_power_max[k].value = float(_charge_max_list[k])
             self.param_battery_discharge_power_max[k].value = float(_discharge_max_list[k])
 
+        # Per-battery availability-window power ceilings (GridEnforcer fork)
+        self._init_battery_availability_params()
+
         # SOC recovery parameters
         self._init_soc_recovery_params()
 
@@ -436,6 +439,96 @@ class Optimization:
             self.num_timesteps, nonneg=True, name="capacity_window_mask"
         )
         self.param_capacity_window.value = np.ones(self.num_timesteps)
+
+    def _init_battery_availability_params(self) -> None:
+        """Initialize per-battery availability-window power ceilings
+        (GridEnforcer fork: per-battery ``batt_start_timestep`` /
+        ``batt_end_timestep`` runtime parameters).
+
+        An EV modelled as a battery is only physically present between a
+        plug-in and a departure timestep; outside that window the optimizer
+        must not allocate charge or discharge to it. Each battery k gets a
+        pair of horizon-shaped nonneg Parameters that ARE its effective
+        power bounds: value = ``availability_mask * power_max``, all-ones
+        mask by default (byte-identical to the unwindowed problem). Like
+        ``param_capacity_window`` these are DPP-safe per-call value updates
+        (no recanonicalisation, warm-start safe) and horizon-shaped, so they
+        must be re-created on resize. Masks live in
+        ``self._batt_avail_masks`` so power-limit updates
+        (:meth:`update_battery_power_limits`) and window updates
+        (:meth:`_apply_battery_availability_windows`) compose in any order.
+        """
+        n = self.num_timesteps
+        self._batt_avail_masks = [np.ones(n) for _ in range(self.n_batt)]
+        self.param_batt_avail_dis_max = [
+            cp.Parameter(n, nonneg=True, name=f"batt_avail_dis_max_{k}")
+            for k in range(self.n_batt)
+        ]
+        self.param_batt_avail_chg_max = [
+            cp.Parameter(n, nonneg=True, name=f"batt_avail_chg_max_{k}")
+            for k in range(self.n_batt)
+        ]
+        self._refresh_battery_availability_values()
+
+    def _refresh_battery_availability_values(self) -> None:
+        """Recompute the availability power-bound Parameter values as
+        ``mask * power_max`` from the current masks and scalar power-limit
+        Parameters. Cheap (numpy only); called whenever either side changes."""
+        for k in range(self.n_batt):
+            dis_max = float(self.param_battery_discharge_power_max[k].value or 0.0)
+            chg_max = float(self.param_battery_charge_power_max[k].value or 0.0)
+            mask = self._batt_avail_masks[k]
+            self.param_batt_avail_dis_max[k].value = mask * dis_max
+            self.param_batt_avail_chg_max[k].value = mask * chg_max
+
+    def _apply_battery_availability_windows(
+        self,
+        batt_start_timestep: list | None,
+        batt_end_timestep: list | None,
+    ) -> None:
+        """Translate per-battery availability windows into power-bound masks.
+
+        Semantics (GridEnforcer fork convention, kept for wire
+        compatibility): the battery is available on the half-open timestep
+        interval ``[start, end)``; ``end == 0`` is a sentinel for "to the
+        horizon end"; ``start == 0 and end == 0`` means no window at all
+        (fully available). Lists shorter than the fleet are padded with 0
+        (no window). Invalid entries disable the window for that battery
+        with a warning. Always assigns every mask, so a cached optimizer
+        never leaks a previous call's window into a windowless call.
+        """
+        n = self.num_timesteps
+        starts = list(batt_start_timestep or [])
+        ends = list(batt_end_timestep or [])
+        starts += [0] * (self.n_batt - len(starts))
+        ends += [0] * (self.n_batt - len(ends))
+        for k in range(self.n_batt):
+            try:
+                start = max(int(starts[k]), 0)
+                end = int(ends[k])
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    "Invalid batt_start/end_timestep for battery %d "
+                    "(%r, %r); ignoring its availability window.",
+                    k,
+                    starts[k],
+                    ends[k],
+                )
+                start, end = 0, 0
+            mask = np.ones(n)
+            if not (start == 0 and end == 0):
+                upper = n if end == 0 else min(end, n)
+                mask[: min(start, n)] = 0.0
+                mask[upper:] = 0.0
+                self.logger.debug(
+                    "Battery %d availability window: timesteps [%d, %d) of %d",
+                    k,
+                    start,
+                    upper,
+                    n,
+                )
+            self._batt_avail_masks[k] = mask
+        self._refresh_battery_availability_values()
 
     def _init_deferrable_load_params(self) -> None:
         """
@@ -1048,6 +1141,27 @@ class Optimization:
             if k < len(self.param_current_operating_timesteps):
                 self.param_current_operating_timesteps[k].value = float(elapsed)
 
+    def _battery_dc_coupling_list(self) -> list[bool]:
+        """Per-battery DC-coupling flags (GridEnforcer fork:
+        ``battery_is_dc_coupled``, scalar or per-battery list, default True).
+
+        True = the battery hangs on the hybrid inverter's DC bus (the
+        upstream assumption for every battery); False = AC-coupled (e.g. a
+        V2G EV charger with its own AC connection) - its power must enter
+        the AC balance directly and NOT transit the hybrid inverter's DC
+        bus, or the optimizer routes it through the inverter caps and
+        efficiency losses it is not physically subject to. Only consulted
+        when ``inverter_is_hybrid``; without a hybrid inverter every battery
+        is AC-side by construction and the flag is irrelevant.
+        """
+        raw = self.plant_conf.get("battery_is_dc_coupled", True)
+        if isinstance(raw, (list, tuple)):
+            flags = [bool(v) for v in raw][: self.n_batt]
+            flags += [True] * (self.n_batt - len(flags))
+        else:
+            flags = [bool(raw)] * self.n_batt
+        return flags
+
     def _batt_list(
         self,
         source: dict,
@@ -1224,6 +1338,9 @@ class Optimization:
                 self.param_battery_charge_power_max[k].value = new_charge_max
             if self.param_battery_discharge_power_max[k].value != new_discharge_max:
                 self.param_battery_discharge_power_max[k].value = new_discharge_max
+        # Availability ceilings are mask * power_max - recompute so a runtime
+        # power-limit change lands in the effective bounds too (GridEnforcer).
+        self._refresh_battery_availability_values()
 
     def update_thermal_start_temps(self, optim_conf: dict) -> None:
         """
@@ -1655,11 +1772,17 @@ class Optimization:
             vars_dict["soc_surplus_cost"] = []
             for k in range(self.n_batt):
                 p_sto_pos_k = cp.Variable(n, nonneg=True, name=f"p_sto_pos_{k}")
-                constraints.append(p_sto_pos_k <= self.param_battery_discharge_power_max[k])
+                # Effective bound = availability_mask * discharge_power_max
+                # (GridEnforcer fork): all-ones mask reproduces the plain
+                # scalar bound exactly; a windowed battery (EV present only
+                # [start, end)) is pinned to 0 outside its window. The scalar
+                # power-limit Parameters stay authoritative for ramp/
+                # reachability math elsewhere.
+                constraints.append(p_sto_pos_k <= self.param_batt_avail_dis_max[k])
                 vars_dict["p_sto_pos"].append(p_sto_pos_k)
 
                 p_sto_neg_k = cp.Variable(n, nonpos=True, name=f"p_sto_neg_{k}")
-                constraints.append(p_sto_neg_k >= -self.param_battery_charge_power_max[k])
+                constraints.append(p_sto_neg_k >= -self.param_batt_avail_chg_max[k])
                 vars_dict["p_sto_neg"].append(p_sto_neg_k)
 
                 vars_dict["soc_low_recovered"].append(
@@ -2089,8 +2212,28 @@ class Optimization:
 
         # Main Power Balance Constraints
         if self.plant_conf["inverter_is_hybrid"]:
+            # GridEnforcer fork: AC-coupled batteries (battery_is_dc_coupled
+            # False) inject/draw on the AC side directly - they bypass the
+            # hybrid inverter's DC bus, its conversion efficiencies and its
+            # AC output/input caps. All-DC fleets (the upstream default)
+            # produce empty sums here and the balance is byte-identical.
+            ac_flags = self._battery_dc_coupling_list()
+            ac_flags = (ac_flags + [True] * len(p_sto_pos_list))[: len(p_sto_pos_list)]
+            ac_sto_pos_total = sum(
+                p for p, dc in zip(p_sto_pos_list, ac_flags) if not dc
+            )
+            ac_sto_neg_total = sum(
+                p for p, dc in zip(p_sto_neg_list, ac_flags) if not dc
+            )
             constraints.append(
-                p_hybrid_inverter - p_def_sum - p_load + p_grid_neg + p_grid_pos == 0
+                p_hybrid_inverter
+                + ac_sto_pos_total
+                + ac_sto_neg_total
+                - p_def_sum
+                - p_load
+                + p_grid_neg
+                + p_grid_pos
+                == 0
             )
         else:
             if self.plant_conf["compute_curtailment"]:
@@ -2132,11 +2275,18 @@ class Optimization:
         # Retrieve main interface variables
         p_hybrid_inverter = self.vars["p_hybrid_inverter"]
         p_pv_curtailment = self.vars["p_pv_curtailment"]
-        # #610: fold every battery's power into the DC-bus balance the same
-        # way the main balance does - sum over the actual list length so the
-        # off-case single dummy entry contributes exactly zero.
-        p_sto_pos_total = sum(self.vars["p_sto_pos"])
-        p_sto_neg_total = sum(self.vars["p_sto_neg"])
+        # #610 + GridEnforcer fork: fold only the DC-COUPLED batteries into
+        # the DC-bus balance (sum over the actual list length so the
+        # off-case single dummy entry contributes exactly zero; the dummy is
+        # padded as DC-coupled and is pinned to zero anyway). AC-coupled
+        # batteries enter the main AC balance instead - see
+        # _add_main_power_balance_constraints.
+        pos_list = self.vars["p_sto_pos"]
+        neg_list = self.vars["p_sto_neg"]
+        dc_flags = self._battery_dc_coupling_list()
+        dc_flags = (dc_flags + [True] * len(pos_list))[: len(pos_list)]
+        p_sto_pos_total = sum(p for p, dc in zip(pos_list, dc_flags) if dc)
+        p_sto_neg_total = sum(p for p, dc in zip(neg_list, dc_flags) if dc)
         p_pv = self.param_pv_forecast
 
         # Determine Inverter Capacity (Configuration Logic)
@@ -4275,6 +4425,8 @@ class Optimization:
         soc_target_timestep: int | None = None,
         current_period_peak: float | None = None,
         capacity_charge_window: list | None = None,
+        batt_start_timestep: list | None = None,
+        batt_end_timestep: list | None = None,
         def_total_hours: list | None = None,
         def_total_timestep: list | None = None,
         def_start_timestep: list | None = None,
@@ -4334,6 +4486,10 @@ class Optimization:
             # current_period_peak below it MUST be re-created on resize.
             self._init_capacity_window_param()
 
+            # Re-initialize the per-battery availability power ceilings with
+            # the new horizon (GridEnforcer fork) - vector params, same rule.
+            self._init_battery_availability_params()
+
             # NOTE: param_current_period_peak (issue #623, Phase 2) is a SCALAR
             # cp.Parameter, horizon-independent, so it is intentionally NOT
             # re-created on resize (unlike the soc_target vector floor above).
@@ -4356,6 +4512,11 @@ class Optimization:
         # list).
         batt_conf = self._battery_conf_as_lists() if self.optim_conf["set_use_battery"] else None
         if self.optim_conf["set_use_battery"]:
+            # Per-battery availability windows (GridEnforcer fork). Always
+            # applied - a call without windows resets every mask to ones.
+            self._apply_battery_availability_windows(
+                batt_start_timestep, batt_end_timestep
+            )
             soc_init_list = self._normalize_soc_arg(soc_init)
             soc_final_list = self._normalize_soc_arg(soc_final)
             target_list = batt_conf["soc_target"]
@@ -5693,6 +5854,8 @@ class Optimization:
         soc_target_timestep: int | None = None,
         current_period_peak: float | None = None,
         capacity_charge_window: list | None = None,
+        batt_start_timestep: list | None = None,
+        batt_end_timestep: list | None = None,
         def_total_hours: list | None = None,
         def_total_timestep: list | None = None,
         def_start_timestep: list | None = None,
@@ -5812,6 +5975,8 @@ class Optimization:
             soc_target_timestep=soc_target_timestep,
             current_period_peak=current_period_peak,
             capacity_charge_window=capacity_charge_window,
+            batt_start_timestep=batt_start_timestep,
+            batt_end_timestep=batt_end_timestep,
             def_total_hours=def_total_hours,
             def_total_timestep=def_total_timestep,
             def_start_timestep=def_start_timestep,
