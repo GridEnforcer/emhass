@@ -253,3 +253,127 @@ class TestBatteryDcCoupling(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestBatteryStartupPenalty(unittest.TestCase):
+    """GridEnforcer ge-jeh: set_battery_startup_penalty — the LP-side fix
+    for EV session churn (ge-i2f). Each 0→active transition costs
+    penalty * battery_charge_power_max * unit_load_cost⁺ * timestep, with
+    battery_initial_active exempting a session that is already running."""
+
+    def _sliver_scenario(self, n=8):
+        """Two SEPARATED marginally-profitable windows: without a penalty
+        the solver happily starts two short sessions; with it, lone
+        slivers stop paying for themselves."""
+        index = pd.date_range(
+            "2026-03-03", periods=n, freq="30min", tz="Europe/Tallinn"
+        )
+        p_pv = pd.Series([0.0] * n, index=index)
+        # 2 kW load over 8x30min = 8 kWh; one 30-min 5 kW charge sliver
+        # holds only 2.5 kWh, so serving the expensive steps from the
+        # battery genuinely needs BOTH cheap slivers.
+        p_load = pd.Series([2000.0] * n, index=index)
+        df_input = pd.DataFrame(index=index)
+        # Cheap slivers at steps 1 and 5, moderately expensive elsewhere —
+        # charging in each cheap sliver and discharging later is only
+        # marginally profitable.
+        df_input["unit_load_cost"] = [0.30, 0.10, 0.30, 0.30, 0.30, 0.10, 0.30, 0.30]
+        df_input["unit_prod_price"] = [0.02] * n
+        return index, p_pv, p_load, df_input
+
+    def _run(self, opt, initial_active=None, n=8):
+        index, p_pv, p_load, df_input = self._sliver_scenario(n)
+        return opt.perform_naive_mpc_optim(
+            df_input,
+            p_pv,
+            p_load,
+            n,
+            soc_init=0.5,
+            soc_final=0.5,
+            battery_initial_active=initial_active,
+            def_total_hours=[],
+            def_total_timestep=[],
+            def_start_timestep=[],
+            def_end_timestep=[],
+        )
+
+    def _active_blocks(self, p, tol=1.0):
+        """Count contiguous nonzero-power blocks."""
+        active = [abs(v) > tol for v in p]
+        blocks = 0
+        prev = False
+        for a in active:
+            if a and not prev:
+                blocks += 1
+            prev = a
+        return blocks
+
+    def test_default_zero_penalty_is_noop(self):
+        """Default 0.0 = disabled: no activity binaries, no start vars —
+        structurally byte-identical (the N=1 regression pins in
+        test_multi_battery_optimization.py prove the numbers)."""
+        opt = build_optimization()
+        self.assertFalse(opt._battery_startup_penalties_enabled())
+        opt_res = self._run(opt)
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        self.assertNotIn("batt_active", opt.vars)
+        self.assertNotIn("batt_start", opt.vars)
+        self.assertIsNotNone(opt_res)
+
+    def test_penalty_reduces_session_starts(self):
+        opt = build_optimization(
+            optim_overrides={"set_battery_startup_penalty": 5.0}
+        )
+        self.assertTrue(opt._battery_startup_penalties_enabled())
+        opt_res = self._run(opt)
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        baseline = build_optimization()
+        base_res = self._run(baseline)
+        self.assertLess(
+            self._active_blocks(opt_res["P_batt"].to_numpy()),
+            self._active_blocks(base_res["P_batt"].to_numpy()),
+        )
+
+    def test_initial_active_makes_continuation_free(self):
+        """With a session already running, an immediate first block incurs
+        no start cost — the plan may keep using the battery from step 0,
+        and the objective must be at least as good as the cold-start case."""
+        opt_cold = build_optimization(
+            optim_overrides={"set_battery_startup_penalty": 2.0}
+        )
+        self._run(opt_cold, initial_active=[0])
+        cold_obj = opt_cold.prob.value
+
+        opt_warm = build_optimization(
+            optim_overrides={"set_battery_startup_penalty": 2.0}
+        )
+        self._run(opt_warm, initial_active=[1])
+        warm_obj = opt_warm.prob.value
+        # Objective is maximized profit (negative cost); warm start can only
+        # help or equal.
+        self.assertGreaterEqual(warm_obj, cold_obj - 1e-9)
+
+    def test_per_battery_penalty_only_hits_flagged_battery(self):
+        opt = build_optimization(
+            plant_overrides=_two_battery_overrides(),
+            optim_overrides={"set_battery_startup_penalty": [0.0, 5.0]},
+        )
+        index, p_pv, p_load, df_input = self._sliver_scenario()
+        opt_res = opt.perform_naive_mpc_optim(
+            df_input,
+            p_pv,
+            p_load,
+            8,
+            soc_init=[0.5, 0.5],
+            soc_final=[0.5, 0.5],
+            def_total_hours=[],
+            def_total_timestep=[],
+            def_start_timestep=[],
+            def_end_timestep=[],
+        )
+        self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
+        # Battery 1 (heavy penalty) stays out; battery 0 does the arbitrage.
+        self.assertEqual(self._active_blocks(opt_res["P_batt_1"].to_numpy()), 0)
+        self.assertGreaterEqual(
+            self._active_blocks(opt_res["P_batt_0"].to_numpy()), 1
+        )
