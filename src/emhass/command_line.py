@@ -192,6 +192,10 @@ class OptimizationCacheKey:
     costfun: str
     plant_conf_hash: str
     optim_conf_structural_hash: str  # Hash of optim_conf keys that affect problem structure
+    # Per-battery salvage-enabled mask (GridEnforcer ge-zues): membership is
+    # structural (constraint set + objective term); the price value itself is
+    # a cp.Parameter and excluded from the structural hash.
+    battery_salvage_mask: tuple = ()
 
 
 class OptimizationCache:
@@ -316,6 +320,9 @@ class OptimizationCache:
             "lp_solver_mip_rel_gap",
             "num_threads",
             "lp_solver",
+            # Salvage price VALUE is a cp.Parameter (ge-zues); the enabled
+            # mask is the explicit battery_salvage_mask field below.
+            "battery_salvage_price",
             # Forecast method selection (not optimization structure)
             "weather_forecast_method",
             "load_cost_forecast_method",
@@ -345,6 +352,10 @@ class OptimizationCache:
                 load_type = "standard"
             def_structure.append((i, load_type))
 
+        _salvage_raw = optim_conf.get("battery_salvage_price", 0.0)
+        _salvage_list = (
+            list(_salvage_raw) if isinstance(_salvage_raw, list | tuple) else [_salvage_raw]
+        )
         return OptimizationCacheKey(
             number_of_deferrable_loads=optim_conf.get("number_of_deferrable_loads", 0),
             set_use_battery=optim_conf.get("set_use_battery", False),
@@ -399,6 +410,7 @@ class OptimizationCache:
             delta_forecast_daily_s=to_seconds(optim_conf.get("delta_forecast_daily")),
             num_timesteps=num_timesteps,
             costfun=costfun,
+            battery_salvage_mask=tuple(bool(float(v or 0.0) > 0) for v in _salvage_list),
             plant_conf_hash=config_hash(plant_conf, plant_runtime_keys),
             optim_conf_structural_hash=config_hash(optim_conf, optim_conf_runtime_keys),
         )

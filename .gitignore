@@ -169,3 +169,6 @@ docs/EMHASS_presentation.pdf
 # DS_Store files
 */.DS_Store
 .DS_Store
+# test-run artifacts
+data/last_run.json
+data/plan_latest.json
