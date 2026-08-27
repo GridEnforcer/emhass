@@ -3718,6 +3718,10 @@ BATT_ARRAY_PARAMS_PLANT_CONF: dict[str, bool | int | float] = {
 }
 BATT_ARRAY_PARAMS_OPTIM_CONF: dict[str, bool | int | float] = {
     "set_battery_startup_penalty": 0.0,
+    # Terminal salvage price, currency/kWh (GridEnforcer ge-zues). 0 = the
+    # battery keeps the soc_final terminal target; > 0 = terminal state is
+    # priced in the objective instead (see Optimization._battery_salvage_*).
+    "battery_salvage_price": 0.0,
     "battery_soc_deficit_threshold": 0.4,
     "battery_soc_deficit_cost": 0.0,
     "battery_soc_surplus_threshold": 0.9,

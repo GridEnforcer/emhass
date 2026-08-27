@@ -1,5 +1,9 @@
 # Changelog
 
+## GridEnforcer fork — 2026-08-26 (ge-zues)
+
+- **Terminal salvage value per battery (`battery_salvage_price`, currency/kWh, scalar or per-battery list, default 0 = off).** A battery with a salvage price > 0 is excluded from the terminal soc_final constraint; instead its end-of-horizon stored energy is rewarded in the objective at that price (DPP-safe: only the variable part of the terminal energy enters, priced via a per-battery `cp.Parameter`, so price changes never rebuild the problem — the enabled MASK is structural and part of the `OptimizationCacheKey`). The LP then discharges only when today's value beats holding the energy, hoards when buying now is cheaper than the terminal value, and holds inside the efficiency deadband — no more forced round-trips to a pinned target (the finite-horizon no-cost-to-go problem; GridEnforcer ge-xdm option B). Min/max SoC bounds and the intermediate deadline floor (#553) compose unchanged, so SOC-by-departure still works on top. Default is byte-identical (multi-battery pin tests untouched). Tests: tests/test_salvage_value.py (6).
+
 ## 0.18.1 - 2026-08-15
 
 ### Improvement

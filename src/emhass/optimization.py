@@ -280,6 +280,11 @@ class Optimization:
         self.param_soc_final = [
             cp.Parameter(nonneg=True, name=f"soc_final_{k}") for k in range(self.n_batt)
         ]
+        # Terminal salvage price per battery, currency/Wh (ge-zues). Value-only
+        # parameter: enabling/disabling is the structural _battery_salvage_mask.
+        self.param_salvage_price = [
+            cp.Parameter(nonneg=True, name=f"salvage_price_{k}") for k in range(self.n_batt)
+        ]
 
         # Battery power limits — parameterised so SoC-derated values arriving
         # via runtimeparams update without invalidating the OptimizationCache.
@@ -553,6 +558,37 @@ class Optimization:
         return self.optim_conf.get("set_use_battery", False) and any(
             v > 0 for v in self._battery_startup_penalty_list()
         )
+
+    def _battery_salvage_price_list(self) -> list[float]:
+        """Per-battery terminal salvage prices (GridEnforcer ge-zues:
+        ``battery_salvage_price``, currency/kWh, scalar or per-battery
+        list, default 0.0 = disabled).
+
+        A battery with a salvage price > 0 is EXCLUDED from the terminal
+        soc_final constraint; instead its end-of-horizon stored energy is
+        rewarded in the objective at this price. The LP then leaves the
+        battery at whatever SoC the economics justify — discharge tonight
+        only when tonight's price beats the salvage value of holding the
+        energy — instead of being pinned to a fixed terminal target
+        (finite-horizon "no cost-to-go" problem; ge-xdm option B)."""
+        raw = self.optim_conf.get("battery_salvage_price", 0.0)
+        if isinstance(raw, (list, tuple)):
+            vals = [float(v or 0.0) for v in raw][: self.n_batt]
+            vals += [0.0] * (self.n_batt - len(vals))
+        else:
+            vals = [float(raw or 0.0)] * self.n_batt
+        return vals
+
+    def _battery_salvage_mask(self) -> list[bool]:
+        """True per battery when salvage-value terminal handling is on.
+
+        STRUCTURAL: membership changes the constraint set and the
+        objective, so the mask is part of the OptimizationCache key
+        (command_line._compute_cache_key). The price VALUE is a
+        cp.Parameter and never forces a rebuild."""
+        if not self.optim_conf.get("set_use_battery", False):
+            return [False] * self.n_batt
+        return [v > 0 for v in self._battery_salvage_price_list()]
 
     def _init_battery_startup_params(self) -> None:
         """Scalar per-battery Parameters for the receding-horizon current
@@ -2099,6 +2135,33 @@ class Optimization:
                         )
                     )
 
+        # Terminal salvage value (GridEnforcer ge-zues). For each battery in
+        # the salvage mask, reward end-of-horizon stored energy at
+        # param_salvage_price (currency/Wh). Stored energy at the end is
+        # soc_init*cap - sum(power_flow)*dt; the soc_init*cap part is
+        # constant w.r.t. the decision variables (and would be a non-DPP
+        # parameter product), so only the variable part enters: maximizing
+        # stored energy == minimizing salvage-priced net discharge.
+        salvage_mask = self._battery_salvage_mask()
+        if any(salvage_mask):
+            eff_dis_l = self._batt_list(
+                self.plant_conf, "battery_discharge_efficiency", default=0.95
+            )
+            eff_chg_l = self._batt_list(
+                self.plant_conf, "battery_charge_efficiency", default=0.95
+            )
+            for k in range(self.n_batt):
+                if not salvage_mask[k]:
+                    continue
+                power_flow_k = p_sto_pos[k] * (1 / float(eff_dis_l[k])) + p_sto_neg[
+                    k
+                ] * float(eff_chg_l[k])
+                objective_terms.append(
+                    -self.param_salvage_price[k]
+                    * cp.sum(power_flow_k)
+                    * self.time_step
+                )
+
         # Deferrable Load Startup Penalties
         if (
             "set_deferrable_startup_penalty" in self.optim_conf
@@ -2527,6 +2590,7 @@ class Optimization:
         # numpy space over realized values, here as CVXPY expressions) and
         # must stay in lockstep with it.
         current_stored_energy_list = []
+        salvage_mask = self._battery_salvage_mask()
         for k in range(self.n_batt):
             cap = cap_list[k]
             eff_dis = eff_dis_list[k]
@@ -2660,13 +2724,23 @@ class Optimization:
             # slacks absorb any unreachable remainder and are charged in the objective, so
             # the equality still holds exactly whenever a schedule exists for it. Per
             # battery: each battery's own target relaxes independently.
-            total_energy_change = cp.sum(energy_change)
-            constraints.append(
-                total_energy_change
-                == (soc_init_k - soc_final_k) * cap
-                + self.vars["soc_final_under"][k]
-                - self.vars["soc_final_over"][k]
-            )
+            #
+            # Salvage-value batteries (ge-zues) are EXCLUDED: their terminal
+            # state is priced in the objective instead of targeted here. The
+            # min/max SoC band and any intermediate deadline floor still
+            # bound the trajectory; dropping this constraint WITHOUT the
+            # objective's salvage term would dump the battery to its floor
+            # (the ge-xdm trap), which is why the two ship together. The
+            # battery's soc_final slacks then appear only in the penalty
+            # term, where their optimum is 0.
+            if not salvage_mask[k]:
+                total_energy_change = cp.sum(energy_change)
+                constraints.append(
+                    total_energy_change
+                    == (soc_init_k - soc_final_k) * cap
+                    + self.vars["soc_final_under"][k]
+                    - self.vars["soc_final_over"][k]
+                )
 
             # Intermediate SOC target (issue #553): require SoC >= target at the
             # requested timestep, leaving the battery free to discharge afterward.
@@ -4889,9 +4963,12 @@ class Optimization:
             # #610: per battery k, mirroring the pre-#610 single-battery
             # assignments below exactly (at n_batt==1 this loop runs once with
             # k==0, byte-identical values).
+            salvage_prices = self._battery_salvage_price_list()
             for k in range(self.n_batt):
                 self.param_soc_init[k].value = soc_init_list[k]
                 self.param_soc_final[k].value = soc_final_list[k]
+                # currency/kWh -> currency/Wh to match Wh energy terms (ge-zues)
+                self.param_salvage_price[k].value = 0.001 * salvage_prices[k]
                 self.param_battery_charge_power_max[k].value = float(
                     batt_conf["charge_power_max"][k]
                 )
