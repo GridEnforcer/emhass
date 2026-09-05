@@ -290,6 +290,28 @@ class MLForecaster:
 
             self.data_exo = await self.interpolate_async(self.data_exo)
 
+            # Leading gaps survive a forward linear interpolation (GridEnforcer
+            # ge-jfe7): a sensor younger than historic_days_to_retrieve
+            # arrives as NaN from the window start to its first sample, and
+            # skforecast then rejects `y` with "has missing values". Those rows
+            # carry no information - drop them and train on the span that
+            # exists, rather than fabricating a flat prefix by back-filling.
+            first_valid = self.data_exo[self.var_model].first_valid_index()
+            if first_valid is None:
+                raise ValueError(
+                    f"{self.var_model}: no valid samples in the retrieved window "
+                    f"({self.data_exo.index[0]} .. {self.data_exo.index[-1]}) - "
+                    "is the sensor recorded (state_class) and spelled right?"
+                )
+            leading_gap = int(self.data_exo.index.get_loc(first_valid))
+            if leading_gap > 0:
+                self.logger.warning(
+                    f"{self.var_model}: dropping {leading_gap} leading rows with no data "
+                    f"({self.data_exo.index[0]} .. {first_valid}); training on the "
+                    f"{len(self.data_exo) - leading_gap} rows the sensor actually has"
+                )
+                self.data_exo = self.data_exo.loc[first_valid:]
+
             # train/test split
             self.date_train = (
                 self.data_exo.index[-1] - pd.Timedelta("5days") + self.data_exo.index.freq
@@ -300,6 +322,23 @@ class MLForecaster:
             self.data_train = self.data_exo.loc[: self.date_split - self.data_exo.index.freq, :]
             self.data_test = self.data_exo.loc[self.date_split :, :]
             self.steps = len(self.data_test)
+            # Each training sample spans num_lags rows, so the usable sample
+            # count is len(train) - num_lags. Require at least num_lags of
+            # them: with fewer, the estimator has less data than features
+            # and the result is a model worse than a constant (customer #1
+            # 2026-09-05: 60 rows, 48 lags, 12 samples, R2 = -1.78 on test).
+            # Failing here keeps the naive fallback in charge until the
+            # sensor has enough history. Said in sensor terms rather than
+            # letting skforecast throw a shape error (GridEnforcer ge-jfe7).
+            min_train_rows = 2 * self.num_lags
+            if len(self.data_train) < min_train_rows:
+                raise ValueError(
+                    f"{self.var_model}: only {len(self.data_train)} training rows after "
+                    f"reserving the last {split_date_delta} as test data; num_lags="
+                    f"{self.num_lags} needs at least {min_train_rows} - the sensor has "
+                    f"{self.data_exo.index[-1] - self.data_exo.index[0]} of history; "
+                    "wait for more, or lower num_lags / split_date_delta"
+                )
 
             # Pick correct sklearn model
             base_model = self._get_sklearn_model(self.sklearn_model)
