@@ -20,6 +20,7 @@
   "weight_battery_discharge": 0.0,
   "weight_battery_charge": 0.0,
   "set_battery_startup_penalty": 0.0,
+  "battery_salvage_price": 0.0,
   "sensor_power_photovoltaics": "sensor.power_photovoltaics",
   "sensor_power_photovoltaics_forecast": "sensor.p_pv_forecast",
   "sensor_power_battery": "sensor.power_battery",
