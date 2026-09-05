@@ -469,12 +469,10 @@ class Optimization:
         n = self.num_timesteps
         self._batt_avail_masks = [np.ones(n) for _ in range(self.n_batt)]
         self.param_batt_avail_dis_max = [
-            cp.Parameter(n, nonneg=True, name=f"batt_avail_dis_max_{k}")
-            for k in range(self.n_batt)
+            cp.Parameter(n, nonneg=True, name=f"batt_avail_dis_max_{k}") for k in range(self.n_batt)
         ]
         self.param_batt_avail_chg_max = [
-            cp.Parameter(n, nonneg=True, name=f"batt_avail_chg_max_{k}")
-            for k in range(self.n_batt)
+            cp.Parameter(n, nonneg=True, name=f"batt_avail_chg_max_{k}") for k in range(self.n_batt)
         ]
         self._refresh_battery_availability_values()
 
@@ -1893,8 +1891,7 @@ class Optimization:
                     for k in range(self.n_batt)
                 ]
                 vars_dict["batt_start"] = [
-                    cp.Variable(n, nonneg=True, name=f"batt_start_{k}")
-                    for k in range(self.n_batt)
+                    cp.Variable(n, nonneg=True, name=f"batt_start_{k}") for k in range(self.n_batt)
                 ]
             vars_dict["soc_final_under"] = [
                 cp.Variable(nonneg=True, name=f"soc_final_under_{k}") for k in range(self.n_batt)
@@ -2119,20 +2116,14 @@ class Optimization:
         # a negative-price slot can never REWARD session churn.
         if self._battery_startup_penalties_enabled():
             _batt_penalties = self._battery_startup_penalty_list()
-            _batt_nominal = self._batt_list(
-                self.plant_conf, "battery_charge_power_max", default=0
-            )
+            _batt_nominal = self._batt_list(self.plant_conf, "battery_charge_power_max", default=0)
             for k in range(self.n_batt):
                 if _batt_penalties[k] > 0:
                     objective_terms.append(
                         -scale
                         * _batt_penalties[k]
                         * float(_batt_nominal[k] or 0)
-                        * cp.sum(
-                            cp.multiply(
-                                self.vars["batt_start"][k], self.param_load_cost_pos
-                            )
-                        )
+                        * cp.sum(cp.multiply(self.vars["batt_start"][k], self.param_load_cost_pos))
                     )
 
         # Terminal salvage value (GridEnforcer ge-zues). For each battery in
@@ -2147,19 +2138,15 @@ class Optimization:
             eff_dis_l = self._batt_list(
                 self.plant_conf, "battery_discharge_efficiency", default=0.95
             )
-            eff_chg_l = self._batt_list(
-                self.plant_conf, "battery_charge_efficiency", default=0.95
-            )
+            eff_chg_l = self._batt_list(self.plant_conf, "battery_charge_efficiency", default=0.95)
             for k in range(self.n_batt):
                 if not salvage_mask[k]:
                     continue
-                power_flow_k = p_sto_pos[k] * (1 / float(eff_dis_l[k])) + p_sto_neg[
-                    k
-                ] * float(eff_chg_l[k])
+                power_flow_k = p_sto_pos[k] * (1 / float(eff_dis_l[k])) + p_sto_neg[k] * float(
+                    eff_chg_l[k]
+                )
                 objective_terms.append(
-                    -self.param_salvage_price[k]
-                    * cp.sum(power_flow_k)
-                    * self.time_step
+                    -self.param_salvage_price[k] * cp.sum(power_flow_k) * self.time_step
                 )
 
         # Deferrable Load Startup Penalties
@@ -2360,12 +2347,8 @@ class Optimization:
             # produce empty sums here and the balance is byte-identical.
             ac_flags = self._battery_dc_coupling_list()
             ac_flags = (ac_flags + [True] * len(p_sto_pos_list))[: len(p_sto_pos_list)]
-            ac_sto_pos_total = sum(
-                p for p, dc in zip(p_sto_pos_list, ac_flags) if not dc
-            )
-            ac_sto_neg_total = sum(
-                p for p, dc in zip(p_sto_neg_list, ac_flags) if not dc
-            )
+            ac_sto_pos_total = sum(p for p, dc in zip(p_sto_pos_list, ac_flags) if not dc)
+            ac_sto_neg_total = sum(p for p, dc in zip(p_sto_neg_list, ac_flags) if not dc)
             constraints.append(
                 p_hybrid_inverter
                 + ac_sto_pos_total
@@ -4685,9 +4668,7 @@ class Optimization:
         if self.optim_conf["set_use_battery"]:
             # Per-battery availability windows (GridEnforcer fork). Always
             # applied - a call without windows resets every mask to ones.
-            self._apply_battery_availability_windows(
-                batt_start_timestep, batt_end_timestep
-            )
+            self._apply_battery_availability_windows(batt_start_timestep, batt_end_timestep)
             # Current session state for the startup penalty (ge-jeh).
             self._apply_battery_initial_active(battery_initial_active)
             soc_init_list = self._normalize_soc_arg(soc_init)

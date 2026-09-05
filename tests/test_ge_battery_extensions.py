@@ -129,12 +129,8 @@ class TestBatteryAvailabilityWindows(unittest.TestCase):
         opt_res = _run_mpc(opt, soc_init=[0.5, 0.5], soc_final=[0.5, 0.5])
         self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
         for k in range(2):
-            np.testing.assert_allclose(
-                opt.param_batt_avail_dis_max[k].value, 3000.0, atol=1e-6
-            )
-            np.testing.assert_allclose(
-                opt.param_batt_avail_chg_max[k].value, 3000.0, atol=1e-6
-            )
+            np.testing.assert_allclose(opt.param_batt_avail_dis_max[k].value, 3000.0, atol=1e-6)
+            np.testing.assert_allclose(opt.param_batt_avail_chg_max[k].value, 3000.0, atol=1e-6)
         self.assertIsNotNone(opt_res)
 
     def test_invalid_window_entries_ignored_with_full_availability(self):
@@ -148,9 +144,7 @@ class TestBatteryAvailabilityWindows(unittest.TestCase):
         )
         self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
         for k in range(2):
-            np.testing.assert_allclose(
-                opt.param_batt_avail_dis_max[k].value, 3000.0, atol=1e-6
-            )
+            np.testing.assert_allclose(opt.param_batt_avail_dis_max[k].value, 3000.0, atol=1e-6)
         self.assertIsNotNone(opt_res)
 
     def test_short_lists_pad_with_no_window(self):
@@ -165,9 +159,7 @@ class TestBatteryAvailabilityWindows(unittest.TestCase):
         self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
         # Battery 0 got the window; battery 1 padded to fully available.
         self.assertEqual(float(opt.param_batt_avail_dis_max[0].value[0]), 0.0)
-        np.testing.assert_allclose(
-            opt.param_batt_avail_dis_max[1].value, 3000.0, atol=1e-6
-        )
+        np.testing.assert_allclose(opt.param_batt_avail_dis_max[1].value, 3000.0, atol=1e-6)
 
 
 class TestBatteryDcCoupling(unittest.TestCase):
@@ -194,9 +186,7 @@ class TestBatteryDcCoupling(unittest.TestCase):
         """An AC-coupled battery serves the load directly, unrestricted by
         the hybrid inverter's (here nearly zero) AC output cap; the hybrid
         balance only carries the DC-coupled battery."""
-        opt = build_optimization(
-            plant_overrides=self._hybrid_overrides([True, False])
-        )
+        opt = build_optimization(plant_overrides=self._hybrid_overrides([True, False]))
         index, p_pv, p_load, df_input = self._load_only_scenario()
         opt_res = opt.perform_naive_mpc_optim(
             df_input,
@@ -225,7 +215,8 @@ class TestBatteryDcCoupling(unittest.TestCase):
         balance: P_hybrid == P_PV + fleet P_batt. Complements upstream's own
         test_n2_hybrid_dc_bus_balance_holds pin."""
         opt = build_optimization(
-            plant_overrides=self._hybrid_overrides(True) | {
+            plant_overrides=self._hybrid_overrides(True)
+            | {
                 "inverter_ac_output_max": 8000,
                 "inverter_ac_input_max": 8000,
             }
@@ -265,9 +256,7 @@ class TestBatteryStartupPenalty(unittest.TestCase):
         """Two SEPARATED marginally-profitable windows: without a penalty
         the solver happily starts two short sessions; with it, lone
         slivers stop paying for themselves."""
-        index = pd.date_range(
-            "2026-03-03", periods=n, freq="30min", tz="Europe/Tallinn"
-        )
+        index = pd.date_range("2026-03-03", periods=n, freq="30min", tz="Europe/Tallinn")
         p_pv = pd.Series([0.0] * n, index=index)
         # 2 kW load over 8x30min = 8 kWh; one 30-min 5 kW charge sliver
         # holds only 2.5 kWh, so serving the expensive steps from the
@@ -321,9 +310,7 @@ class TestBatteryStartupPenalty(unittest.TestCase):
         self.assertIsNotNone(opt_res)
 
     def test_penalty_reduces_session_starts(self):
-        opt = build_optimization(
-            optim_overrides={"set_battery_startup_penalty": 5.0}
-        )
+        opt = build_optimization(optim_overrides={"set_battery_startup_penalty": 5.0})
         self.assertTrue(opt._battery_startup_penalties_enabled())
         opt_res = self._run(opt)
         self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
@@ -338,15 +325,11 @@ class TestBatteryStartupPenalty(unittest.TestCase):
         """With a session already running, an immediate first block incurs
         no start cost — the plan may keep using the battery from step 0,
         and the objective must be at least as good as the cold-start case."""
-        opt_cold = build_optimization(
-            optim_overrides={"set_battery_startup_penalty": 2.0}
-        )
+        opt_cold = build_optimization(optim_overrides={"set_battery_startup_penalty": 2.0})
         self._run(opt_cold, initial_active=[0])
         cold_obj = opt_cold.prob.value
 
-        opt_warm = build_optimization(
-            optim_overrides={"set_battery_startup_penalty": 2.0}
-        )
+        opt_warm = build_optimization(optim_overrides={"set_battery_startup_penalty": 2.0})
         self._run(opt_warm, initial_active=[1])
         warm_obj = opt_warm.prob.value
         # Objective is maximized profit (negative cost); warm start can only
@@ -374,6 +357,4 @@ class TestBatteryStartupPenalty(unittest.TestCase):
         self.assertIn(opt.optim_status, VALID_OPTIMAL_STATUSES)
         # Battery 1 (heavy penalty) stays out; battery 0 does the arbitrage.
         self.assertEqual(self._active_blocks(opt_res["P_batt_1"].to_numpy()), 0)
-        self.assertGreaterEqual(
-            self._active_blocks(opt_res["P_batt_0"].to_numpy()), 1
-        )
+        self.assertGreaterEqual(self._active_blocks(opt_res["P_batt_0"].to_numpy()), 1)
