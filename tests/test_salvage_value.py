@@ -110,9 +110,7 @@ class TestSalvageValue(unittest.TestCase):
             },
         )
         _, p_pv, p_load, df_input = _scenario([0.35] * 10, load=2000)
-        res = _run(
-            opt, df_input, p_pv, p_load, soc_init=[0.8, 0.8], soc_final=[0.8, 0.8]
-        )
+        res = _run(opt, df_input, p_pv, p_load, soc_init=[0.8, 0.8], soc_final=[0.8, 0.8])
         soc0 = res["SOC_opt_0"].to_numpy()[-1]
         soc1 = res["SOC_opt_1"].to_numpy()[-1]
         self.assertAlmostEqual(soc0, 0.8, delta=0.01)  # pinned round-trips
@@ -130,3 +128,87 @@ class TestSalvageValue(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSalvagePriceRuntimeRouting(unittest.IsolatedAsyncioTestCase):
+    """ge-mo3z: the salvage price arrives as a RUNTIME param over the REST
+    API (GridEnforcer plugin sends ``battery_salvage_price`` next to the other
+    per-battery arrays). treat_runtimeparams routes runtime keys into
+    optim_conf only through associations.csv; without a row there the key is
+    silently dropped, check_batt_params fills the 0.0 default, the salvage
+    mask is all-False and the terminal soc_final pin is built as upstream.
+    The tests above inject via optim_conf directly and never exercised this.
+    """
+
+    @staticmethod
+    def _emhass_conf() -> dict:
+        import pathlib
+
+        from emhass import utils
+
+        root = pathlib.Path(utils.get_root(__file__, num_parent=2))
+        root_path = root / "src/emhass/"
+        return {
+            "data_path": root / "data/",
+            "root_path": root_path,
+            "options_path": root / "options.json",
+            "config_path": root / "config.json",
+            "secrets_path": root / "secrets_emhass(example).yaml",
+            "legacy_config_path": pathlib.Path(utils.get_root(__file__, num_parent=1))
+            / "config_emhass.yaml",
+            "defaults_path": root_path / "data/config_defaults.json",
+            "associations_path": root_path / "data/associations.csv",
+        }
+
+    async def _route(self, runtime_extra: dict, num_batteries: int = 1) -> dict:
+        import orjson
+
+        from emhass import utils
+
+        emhass_conf = self._emhass_conf()
+        logger, _ = utils.get_logger(__name__, emhass_conf, save_to_file=False)
+        config = await utils.build_config(emhass_conf, logger, emhass_conf["defaults_path"])
+        _, secrets = await utils.build_secrets(emhass_conf, logger, no_response=True)
+        params = await utils.build_params(emhass_conf, secrets, config, logger)
+        params["plant_conf"]["number_of_batteries"] = num_batteries
+        params["optim_conf"]["set_use_battery"] = True
+        runtimeparams = {
+            "pv_power_forecast": [100.0] * 48,
+            "load_power_forecast": [100.0] * 48,
+            "load_cost_forecast": [1.0] * 48,
+            "prod_price_forecast": [0.5] * 48,
+            "prediction_horizon": 48,
+            "number_of_batteries": num_batteries,
+            **runtime_extra,
+        }
+        params_json = orjson.dumps(params).decode("utf-8")
+        retrieve_hass_conf, optim_conf, plant_conf = utils.get_yaml_parse(params_json, logger)
+        _, _, optim_conf_out, _ = await utils.treat_runtimeparams(
+            runtimeparams,
+            params_json,
+            retrieve_hass_conf,
+            optim_conf,
+            plant_conf,
+            "naive-mpc-optim",
+            logger,
+            emhass_conf,
+        )
+        return optim_conf_out
+
+    async def test_scalar_salvage_price_reaches_optim_conf(self):
+        optim_conf = await self._route({"battery_salvage_price": 2.4163})
+        self.assertEqual(optim_conf["battery_salvage_price"], 2.4163)
+
+    async def test_per_battery_salvage_list_reaches_optim_conf(self):
+        optim_conf = await self._route({"battery_salvage_price": [0.0, 1.7]}, num_batteries=2)
+        self.assertEqual(optim_conf["battery_salvage_price"], [0.0, 1.7])
+
+    async def test_absent_salvage_price_defaults_to_off(self):
+        optim_conf = await self._route({})
+        self.assertEqual(optim_conf["battery_salvage_price"], 0.0)
+
+    async def test_startup_penalty_routes_the_same_way(self):
+        """Regression guard for the sibling fork param that IS routed — if
+        this passes and the salvage tests fail, the gap is the CSV row."""
+        optim_conf = await self._route({"set_battery_startup_penalty": 1.0})
+        self.assertEqual(optim_conf["set_battery_startup_penalty"], 1.0)

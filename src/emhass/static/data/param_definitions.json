@@ -695,6 +695,25 @@
       "default_value": 0.0,
       "unit": "¤/kWh"
     },
+    "battery_is_dc_coupled": {
+      "friendly_name": "Battery is DC-coupled",
+      "Description": "Per-battery flag: true (default) means the battery sits on the hybrid inverter's DC bus and shares its conversion efficiencies and AC caps; false means an AC-coupled battery that injects/draws on the AC side directly. Scalar (broadcast) or one entry per battery. GridEnforcer fork extension.",
+      "input": "array.boolean",
+      "default_value": true
+    },
+    "set_battery_startup_penalty": {
+      "friendly_name": "Battery startup penalty",
+      "Description": "Per-battery penalty for each new charge/discharge session start, as a multiplier of one timestep's energy cost at nominal charge power (analog of set_deferrable_startup_penalty). 0.0 (default) disables it - no extra binaries. Scalar or one entry per battery. GridEnforcer fork extension (ge-jeh).",
+      "input": "array.float",
+      "default_value": 0.0
+    },
+    "battery_salvage_price": {
+      "friendly_name": "Battery terminal salvage price",
+      "Description": "Per-battery value of energy still stored at the end of the horizon (currency/kWh). 0 (default) keeps the battery_target_state_of_charge terminal pin; > 0 drops the pin and rewards end-of-horizon stored energy in the objective at this price instead. Scalar or one entry per battery. GridEnforcer fork extension (ge-zues).",
+      "input": "array.float",
+      "default_value": 0.0,
+      "unit": "¤/kWh"
+    },
     "battery_discharge_power_max": {
       "friendly_name": "Max battery discharge power",
       "Description": "The maximum discharge power in Watts. With number_of_batteries > 1, accepts a scalar (broadcast to every battery) or a list of exactly number_of_batteries entries.",

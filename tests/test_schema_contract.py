@@ -48,6 +48,10 @@ _KNOWN_TYPE_MISMATCHES = frozenset(
         "battery_stress_cost",
         "weight_battery_discharge",
         "weight_battery_charge",
+        # GridEnforcer fork per-battery params: scalar at N=1 like the rest
+        "battery_is_dc_coupled",
+        "set_battery_startup_penalty",
+        "battery_salvage_price",
         "battery_soc_deficit_threshold",
         "battery_soc_deficit_cost",
         "battery_soc_surplus_threshold",
