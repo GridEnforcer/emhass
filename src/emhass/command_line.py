@@ -2697,7 +2697,47 @@ async def forecast_model_fit(
         async with aiofiles.open(filename_path, "wb") as outp:
             await outp.write(pickle.dumps(mlf, pickle.HIGHEST_PROTOCOL))
             logger.debug("saved model to " + str(filename_path))
+        # Publish the fit metrics next to the model so a REST caller (which
+        # only sees "200") can judge the model before serving it - read by
+        # GET /api/v1/ml-fit/<model_type> (GridEnforcer ge-56k0).
+        await write_ml_fit_metrics(
+            input_data_dict["emhass_conf"]["data_path"], model_type, mlf, logger
+        )
     return df_pred, df_pred_backtest, mlf
+
+
+def ml_fit_metrics_path(data_path: pathlib.Path, model_type: str) -> pathlib.Path:
+    """Sidecar file carrying the last fit's metrics for ``model_type``."""
+    return pathlib.Path(data_path) / f"ml_fit_{model_type}.json"
+
+
+async def write_ml_fit_metrics(
+    data_path: pathlib.Path, model_type: str, mlf: MLForecaster, logger: logging.Logger
+) -> None:
+    """Persist ``mlf.fit_metrics_`` (plus a timestamp) as JSON; never raises."""
+    metrics = getattr(mlf, "fit_metrics_", None)
+    if not metrics:
+        return
+    payload = {
+        "model_type": model_type,
+        "fitted_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        **metrics,
+    }
+    target = ml_fit_metrics_path(data_path, model_type)
+    try:
+        async with aiofiles.open(target, "wb") as outp:
+            await outp.write(orjson.dumps(payload))
+    except OSError as exc:
+        logger.warning("ml-fit metrics: failed to write %s: %s", target, exc)
+
+
+def read_ml_fit_metrics(data_path: pathlib.Path, model_type: str) -> dict | None:
+    """Return the last fit's metrics for ``model_type``, or None if never fitted."""
+    target = ml_fit_metrics_path(data_path, model_type)
+    try:
+        return orjson.loads(target.read_bytes())
+    except (OSError, ValueError):
+        return None
 
 
 async def forecast_calibration(input_data_dict: dict, logger: logging.Logger) -> dict | None:

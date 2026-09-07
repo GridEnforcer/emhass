@@ -1,5 +1,9 @@
 # Changelog
 
+## GridEnforcer fork — 2026-09-07 (ge-56k0)
+
+- **Fit metrics with a seasonal-naive baseline, published for REST callers.** A planner training via `/action/forecast-model-fit` only ever saw an HTTP 200; the model's quality lived in the log (customer #1 2026-09-07: R² 0.03 on 5 days of history, served to the planner regardless). `MLForecaster.fit` now scores the fitted model against "same time yesterday" on its own test window (`fit_metrics_`: test/naive R² + MAE, compared rows, train/test rows, history span, leading-gap rows), `forecast_model_fit` writes them to `<data_path>/ml_fit_<model_type>.json`, and `GET /api/v1/ml-fit/<model_type>` serves them (404 `no-fit` before the first fit; in the OpenAPI spec). Tests: `tests/test_ge_ml_fit_metrics.py` (6). Refs ge-56k0.
+
 ## GridEnforcer fork — 2026-09-05 (ge-jfe7)
 
 - **`MLForecaster.fit` trains on the history a young sensor actually has instead of failing forever.** The websocket/statistics path returns NaN from the retrieval-window start to the sensor's first sample; the forward linear `interpolate()` fills interior and trailing gaps but never leading ones, and skforecast then rejected `y` ("has missing values") on every retry. Customer #1 2026-09-05: `base_load_power` recorded since 2026-09-01, `historic_days_to_retrieve` 90 — 86 days of NaN in front, model never trained. The fit now drops the leading gap (logged with the span kept; nothing is back-filled, a fabricated flat prefix would be worse than no model), and when what remains cannot give the estimator at least `num_lags` effective samples (training rows ≥ 2 × `num_lags` after the test window) it raises a message in sensor terms instead of training a model worse than a constant — customer #1 fit on 60 rows / 48 lags scored R² −1.78 on test, and the plugin would have put that in front of the planner. Default path with a complete series is unchanged. Tests: `tests/test_ge_ml_leading_gaps.py` (4). Refs ge-jfe7.

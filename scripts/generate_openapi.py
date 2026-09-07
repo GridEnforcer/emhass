@@ -23,6 +23,7 @@ CURATED = {
     "/action/{action_name}": {"POST"},
     "/api/v1/last-run": {"GET"},
     "/api/v1/plan": {"GET"},
+    "/api/v1/ml-fit/{model_type}": {"GET"},
     "/healthz": {"GET"},
 }
 
@@ -226,6 +227,58 @@ def build_spec(routes: set | None = None) -> dict:
                         "description": "Last-run envelope",
                         **json_ct({"$ref": "#/components/schemas/LastRun"}),
                     }
+                },
+            }
+        },
+        "/api/v1/ml-fit/{model_type}": {
+            "get": {
+                "summary": "Last forecast-model-fit metrics (GridEnforcer fork)",
+                "description": (
+                    "Test-window scores of the last fitted model for model_type next to a "
+                    "seasonal-naive (same time yesterday) baseline on the same window, so a "
+                    "caller that only saw the fit's HTTP 200 can judge whether to serve it. "
+                    "404 with status 'no-fit' when that model has never been fitted."
+                ),
+                "parameters": [
+                    {
+                        "name": "model_type",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "pattern": "^[A-Za-z0-9_\\-]{1,64}$"},
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Fit metrics",
+                        **json_ct(
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "status": {"type": "string", "enum": ["ok"]},
+                                    "model_type": {"type": "string"},
+                                    "fitted_at": {"type": "string", "format": "date-time"},
+                                    "var_model": {"type": "string"},
+                                    "sklearn_model": {"type": "string"},
+                                    "num_lags": {"type": "integer"},
+                                    "freq_minutes": {"type": "integer"},
+                                    "history_start": {"type": "string"},
+                                    "history_end": {"type": "string"},
+                                    "leading_gap_rows": {"type": "integer"},
+                                    "n_train_rows": {"type": "integer"},
+                                    "n_test_rows": {"type": "integer"},
+                                    "n_compared_rows": {"type": "integer"},
+                                    "test_r2": {"type": "number"},
+                                    "test_mae": {"type": "number"},
+                                    "test_mae_vs_naive": {"type": ["number", "null"]},
+                                    "naive_r2": {"type": ["number", "null"]},
+                                    "naive_mae": {"type": ["number", "null"]},
+                                },
+                                "required": ["status", "model_type", "test_r2", "test_mae"],
+                            }
+                        ),
+                    },
+                    "404": {"description": "Model never fitted"},
+                    "400": {"description": "Invalid model_type"},
                 },
             }
         },
