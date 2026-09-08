@@ -158,6 +158,116 @@
         }
       }
     },
+    "/api/v1/ml-fit/{model_type}": {
+      "get": {
+        "summary": "Last forecast-model-fit metrics (GridEnforcer fork)",
+        "description": "Test-window scores of the last fitted model for model_type next to a seasonal-naive (same time yesterday) baseline on the same window, so a caller that only saw the fit's HTTP 200 can judge whether to serve it. 404 with status 'no-fit' when that model has never been fitted.",
+        "parameters": [
+          {
+            "name": "model_type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_\\-]{1,64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fit metrics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ok"
+                      ]
+                    },
+                    "model_type": {
+                      "type": "string"
+                    },
+                    "fitted_at": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "var_model": {
+                      "type": "string"
+                    },
+                    "sklearn_model": {
+                      "type": "string"
+                    },
+                    "num_lags": {
+                      "type": "integer"
+                    },
+                    "freq_minutes": {
+                      "type": "integer"
+                    },
+                    "history_start": {
+                      "type": "string"
+                    },
+                    "history_end": {
+                      "type": "string"
+                    },
+                    "leading_gap_rows": {
+                      "type": "integer"
+                    },
+                    "n_train_rows": {
+                      "type": "integer"
+                    },
+                    "n_test_rows": {
+                      "type": "integer"
+                    },
+                    "n_compared_rows": {
+                      "type": "integer"
+                    },
+                    "test_r2": {
+                      "type": "number"
+                    },
+                    "test_mae": {
+                      "type": "number"
+                    },
+                    "test_mae_vs_naive": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "naive_r2": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "naive_mae": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status",
+                    "model_type",
+                    "test_r2",
+                    "test_mae"
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Model never fitted"
+          },
+          "400": {
+            "description": "Invalid model_type"
+          }
+        }
+      }
+    },
     "/api/v1/plan": {
       "get": {
         "summary": "Latest optimization plan",
@@ -948,6 +1058,34 @@
             "title": "Add cost weight for battery charge",
             "x-unit": "¤/kWh",
             "description": "An additional weight (currency/ kWh) applied in the cost function to battery usage for charging. With number_of_batteries > 1, accepts a scalar (broadcast) or a list of one entry per battery, each entry itself a scalar or a time series - see docs/config.md for the nesting rules. (unit: ¤/kWh)"
+          },
+          "battery_is_dc_coupled": {
+            "type": "array",
+            "items": {
+              "type": "boolean",
+              "default": true
+            },
+            "title": "Battery is DC-coupled",
+            "description": "Per-battery flag: true (default) means the battery sits on the hybrid inverter's DC bus and shares its conversion efficiencies and AC caps; false means an AC-coupled battery that injects/draws on the AC side directly. Scalar (broadcast) or one entry per battery. GridEnforcer fork extension."
+          },
+          "set_battery_startup_penalty": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "default": 0.0
+            },
+            "title": "Battery startup penalty",
+            "description": "Per-battery penalty for each new charge/discharge session start, as a multiplier of one timestep's energy cost at nominal charge power (analog of set_deferrable_startup_penalty). 0.0 (default) disables it - no extra binaries. Scalar or one entry per battery. GridEnforcer fork extension (ge-jeh)."
+          },
+          "battery_salvage_price": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "default": 0.0
+            },
+            "title": "Battery terminal salvage price",
+            "x-unit": "¤/kWh",
+            "description": "Per-battery value of energy still stored at the end of the horizon (currency/kWh). 0 (default) keeps the battery_target_state_of_charge terminal pin; > 0 drops the pin and rewards end-of-horizon stored energy in the objective at this price instead. Scalar or one entry per battery. GridEnforcer fork extension (ge-zues). (unit: ¤/kWh)"
           },
           "battery_discharge_power_max": {
             "type": "array",

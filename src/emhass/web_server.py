@@ -33,6 +33,7 @@ from emhass.command_line import (
     naive_mpc_optim,
     perfect_forecast_optim,
     publish_data,
+    read_ml_fit_metrics,
     regressor_model_fit,
     regressor_model_predict,
     set_input_data_dict,
@@ -686,6 +687,27 @@ async def api_v1_last_run():
         response_body = snap
 
     response = await make_response(orjson.dumps(response_body))
+    response.headers["Content-Type"] = "application/json"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/api/v1/ml-fit/<model_type>", methods=["GET"])
+async def api_v1_ml_fit(model_type: str):
+    """Return the last forecast-model-fit's metrics for ``model_type``
+    (GridEnforcer ge-56k0): test R2/MAE next to a seasonal-naive baseline on
+    the same window, history span, train/test row counts. 404 when that
+    model has never been fitted. Unauthenticated, read-only, no-store.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{1,64}", model_type):
+        return await make_response(orjson.dumps({"error": "invalid model_type"}), 400)
+    metrics = read_ml_fit_metrics(emhass_conf["data_path"], model_type)
+    if metrics is None:
+        response = await make_response(
+            orjson.dumps({"status": "no-fit", "model_type": model_type}), 404
+        )
+    else:
+        response = await make_response(orjson.dumps({"status": "ok", **metrics}))
     response.headers["Content-Type"] = "application/json"
     response.headers["Cache-Control"] = "no-store"
     return response

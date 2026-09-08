@@ -106,6 +106,8 @@ class MLForecaster:
         self.optimize_results: pd.DataFrame | None = None
         self.optimize_results_object = None
         self.backtest_metrics_: dict | None = None
+        # Populated by fit(): test-window scores + seasonal-naive baseline (ge-56k0).
+        self.fit_metrics_: dict | None = None
 
         # A quick data preparation
         self._prepare_data()
@@ -247,6 +249,50 @@ class MLForecaster:
 
         return models[model_name]
 
+    def _compute_fit_metrics(
+        self, predictions: pd.Series, test_r2: float, leading_gap_rows: int
+    ) -> dict:
+        """Score the fitted model against a seasonal-naive baseline on the test
+        window (GridEnforcer ge-56k0).
+
+        The baseline is the value 24 h earlier at the same time of day - the
+        forecast a site would fall back to without a model. Rows whose
+        baseline is unavailable (test window inside the first day of history)
+        are excluded from BOTH scores so they compare like for like; if none
+        remain the naive fields are None.
+        """
+        y_true = self.data_test[self.var_model]
+        y_pred = pd.Series(np.asarray(predictions, dtype=float).ravel(), index=y_true.index)
+        freq = self.data_exo.index.freq or pd.infer_freq(self.data_exo.index)
+        freq_td = pd.tseries.frequencies.to_offset(freq)
+        steps_per_day = int(pd.Timedelta("24h") / pd.Timedelta(freq_td))
+        naive_all = self.data_exo[self.var_model].shift(steps_per_day)
+        naive = naive_all.reindex(y_true.index)
+        mask = naive.notna() & y_true.notna()
+        metrics: dict = {
+            "var_model": self.var_model,
+            "sklearn_model": self.sklearn_model,
+            "num_lags": int(self.num_lags),
+            "freq_minutes": int(pd.Timedelta(freq_td) / pd.Timedelta("1min")),
+            "history_start": str(self.data_exo.index[0]),
+            "history_end": str(self.data_exo.index[-1]),
+            "leading_gap_rows": int(leading_gap_rows),
+            "n_train_rows": int(len(self.data_train)),
+            "n_test_rows": int(len(y_true)),
+            "test_r2": float(test_r2),
+            "test_mae": float((y_true - y_pred).abs().mean()),
+            "n_compared_rows": int(mask.sum()),
+            "naive_r2": None,
+            "naive_mae": None,
+            "test_mae_vs_naive": None,
+        }
+        if mask.sum() >= 2:
+            yt, yp, yn = y_true[mask], y_pred[mask], naive[mask]
+            metrics["test_mae_vs_naive"] = float((yt - yp).abs().mean())
+            metrics["naive_mae"] = float((yt - yn).abs().mean())
+            metrics["naive_r2"] = float(r2_score(yt, yn))
+        return metrics
+
     async def fit(
         self,
         split_date_delta: str | None = "48h",
@@ -370,6 +416,25 @@ class MLForecaster:
                 r2_score, self.data_test[self.var_model], predictions
             )
             self.logger.info(f"Prediction R2 score of fitted model on test data: {pred_metric}")
+            # Fit metrics for callers that only see an HTTP 200 (GridEnforcer
+            # ge-56k0): the test score next to a seasonal-naive baseline
+            # ("same time yesterday") on the SAME window, so a planner can
+            # decide whether this model beats what it would use otherwise.
+            self.fit_metrics_ = self._compute_fit_metrics(predictions, pred_metric, leading_gap)
+            self.logger.info(
+                "Fit metrics: test MAE %.1f vs seasonal-naive MAE %s over %d test rows "
+                "(train rows %d, history %s .. %s)",
+                self.fit_metrics_["test_mae"],
+                (
+                    f"{self.fit_metrics_['naive_mae']:.1f}"
+                    if self.fit_metrics_["naive_mae"] is not None
+                    else "n/a"
+                ),
+                self.fit_metrics_["n_test_rows"],
+                self.fit_metrics_["n_train_rows"],
+                self.fit_metrics_["history_start"],
+                self.fit_metrics_["history_end"],
+            )
 
             # Packing results in a DataFrame
             df_pred = pd.DataFrame(index=self.data_exo.index, columns=["train", "test", "pred"])
