@@ -820,6 +820,20 @@
         "set_use_battery": true
     }
     },
+    "capacity_charge_hourly_average": {
+      "friendly_name": "Capacity charge on clock-hour averages (top-k)",
+      "Description": "When true the capacity (demand) charge prices the average of the capacity_charge_top_k highest clock-hour averages of grid import over the horizon plus the billing period's existing peaks (current_period_peaks), as Swedish effect tariffs do, instead of the highest single timestep. Requires capacity_cost_per_kw > 0. Default false keeps the per-timestep peak_import charge unchanged. GridEnforcer fork extension (ge-g65f).",
+      "input": "boolean",
+      "default_value": false,
+      "unit": "none"
+    },
+    "capacity_charge_top_k": {
+      "friendly_name": "Capacity charge: number of hourly peaks averaged",
+      "Description": "How many of the highest clock-hour averages the tariff averages for the capacity charge (3 for most Swedish DSOs). Only used when capacity_charge_hourly_average is true. Raising one of the top-k hours by 1 kW costs capacity_cost_per_kw / k. GridEnforcer fork extension (ge-g65f).",
+      "input": "int",
+      "default_value": 1,
+      "unit": "count"
+    },
     "capacity_cost_per_kw": {
       "friendly_name": "Capacity (demand) charge cost",
       "Description": "A cost (currency per kW) applied to the peak grid import power over the optimisation horizon, for tariffs with a capacity or demand charge. 0 (default) disables it and leaves the plan unchanged. A positive value makes the optimiser flatten the import peak, trading it off against energy cost in a single pass. The peak is priced once (it is a power charge, not energy), so set it to the marginal value of shaving 1 kW of peak.",

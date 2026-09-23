@@ -49,6 +49,27 @@
       "default_value": null,
       "unit": "none"
     },
+    "current_period_peaks": {
+      "friendly_name": "Current billing-period top-k hourly peaks",
+      "Description": "Optional list of the billing period's current top-k effective clock-hour average grid imports, in Watts, for the hourly-average demand charge (capacity_charge_hourly_average = true). The optimiser prices sum_largest over these and the horizon's own hourly averages, so an hour below the k-th existing peak costs nothing and only hours that would enter the top-k are shaved or, when cheaper, allowed to raise the peak. Padded with zeros / truncated to exactly capacity_charge_top_k entries. Only effective when capacity_cost_per_kw > 0. Only used by naive-mpc-optim. GridEnforcer fork extension (ge-g65f).",
+      "input": "array.float",
+      "default_value": null,
+      "unit": "W"
+    },
+    "current_hour_imported_wh": {
+      "friendly_name": "Energy already imported this clock hour",
+      "Description": "Optional energy already imported from the grid since the start of the current clock hour, in Wh, for the hourly-average demand charge. Added to the current hour's planned import so the hour's average is judged on the whole hour. Only effective when capacity_charge_hourly_average is true and capacity_cost_per_kw > 0. Only used by naive-mpc-optim. GridEnforcer fork extension (ge-g65f).",
+      "input": "float",
+      "default_value": null,
+      "unit": "Wh"
+    },
+    "current_hour_elapsed_h": {
+      "friendly_name": "Hours elapsed in the current clock hour",
+      "Description": "Optional fraction of the current clock hour already elapsed (0 to 1), in hours. The horizon's first step is clipped to the remaining part of the hour so energy already imported (current_hour_imported_wh) is not counted twice. Only effective when capacity_charge_hourly_average is true and capacity_cost_per_kw > 0. Only used by naive-mpc-optim. GridEnforcer fork extension (ge-g65f).",
+      "input": "float",
+      "default_value": null,
+      "unit": "h"
+    },
     "operating_timesteps_of_each_deferrable_load": {
       "friendly_name": "Operating timesteps of each deferrable load",
       "Description": "Per-deferrable-load total number of operating timesteps over the horizon (the timestep-based alternative to operating_hours_of_each_deferrable_load, preferred for sub-hour steps). One int per deferrable load. Only used by naive-mpc-optim. See passing_data.md.",
@@ -59,17 +80,23 @@
     "batt_start_timestep": {
       "friendly_name": "Battery availability window start",
       "Description": "Per-battery availability window start as a 0-based timestep index (inclusive), one entry per battery. Together with batt_end_timestep the battery may only charge/discharge inside [start, end); 0 in both means no window. Naive-MPC only. GridEnforcer fork extension.",
-      "input": "array.int"
+      "input": "array.int",
+      "default_value": null,
+      "unit": "timesteps"
     },
     "batt_end_timestep": {
       "friendly_name": "Battery availability window end",
       "Description": "Per-battery availability window end as a 0-based timestep index (exclusive), one entry per battery; 0 means the window extends to the horizon end. Outside its window a battery is pinned to zero power (EV departed / not yet plugged in). Naive-MPC only. GridEnforcer fork extension.",
-      "input": "array.int"
+      "input": "array.int",
+      "default_value": null,
+      "unit": "timesteps"
     },
     "battery_initial_active": {
       "friendly_name": "Battery session currently active",
       "Description": "Per-battery 0/1 flags: 1 means a charge/discharge session is already active entering the horizon, so the startup penalty (set_battery_startup_penalty) does not charge for continuing it - only for new starts. Naive-MPC only. GridEnforcer fork extension (ge-jeh).",
-      "input": "array.int"
+      "input": "array.int",
+      "default_value": null,
+      "unit": "none"
     }
   },
   "Cost function": {

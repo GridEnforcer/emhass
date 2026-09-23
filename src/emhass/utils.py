@@ -1780,6 +1780,20 @@ async def treat_runtimeparams(
             params["passed_data"]["capacity_charge_window"] = runtimeparams.get(
                 "capacity_charge_window", None
             )
+            # Hourly-average top-k demand charge inputs (GridEnforcer fork,
+            # ge-g65f). Per-call values (the month's current top-k peaks in W,
+            # energy already imported this clock hour in Wh, hours elapsed in
+            # it) - passed_data only, never structural config, for the same
+            # OptimizationCache reason as the window mask above.
+            params["passed_data"]["current_period_peaks"] = runtimeparams.get(
+                "current_period_peaks", None
+            )
+            params["passed_data"]["current_hour_imported_wh"] = runtimeparams.get(
+                "current_hour_imported_wh", None
+            )
+            params["passed_data"]["current_hour_elapsed_h"] = runtimeparams.get(
+                "current_hour_elapsed_h", None
+            )
             # Per-battery availability windows (GridEnforcer fork). Runtime-
             # only lists of 0-based timestep indices, one entry per battery;
             # window is [start, end), end == 0 means "to horizon end",
@@ -1849,6 +1863,9 @@ async def treat_runtimeparams(
             # Like current_period_peak, the demand-window mask is naive-mpc-only:
             # dayahead/perfect optimizations price the full horizon peak.
             params["passed_data"]["capacity_charge_window"] = None
+            params["passed_data"]["current_period_peaks"] = None
+            params["passed_data"]["current_hour_imported_wh"] = None
+            params["passed_data"]["current_hour_elapsed_h"] = None
             # Battery availability windows are likewise naive-mpc-only
             # (GridEnforcer fork) - the receding-horizon caller owns the
             # plug-in/departure timeline.
@@ -3525,6 +3542,9 @@ async def build_params(
         "soc_target_timestep": None,
         "current_period_peak": None,
         "capacity_charge_window": None,
+        "current_period_peaks": None,
+        "current_hour_imported_wh": None,
+        "current_hour_elapsed_h": None,
         "batt_start_timestep": None,
         "batt_end_timestep": None,
         "battery_initial_active": None,

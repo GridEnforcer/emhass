@@ -226,6 +226,21 @@ As an HA `rest_command` template fragment, marking 16:00-20:00 on weekdays for a
 The mask defaults to *unset* (`None`) = every timestep priced, identical to behaviour without this key. An all-zero mask (no window in this horizon) makes the demand term a constant - the plan is then identical to running without a capacity charge. An invalid mask (non-numeric entries, NaN/infinity, or shorter than the horizon) is ignored with a warning and the full horizon is priced; a longer mask is truncated; weights outside `[0, 1]` are clipped. Fractional weights are allowed and scale how much of that timestep's import the priced peak sees. If your billing period resets monthly, also zero the mask entries that fall in the *next* month and reset `current_period_peak` on the boundary, so the new period starts from a clean floor.
 ```
 
+### Pricing clock-hour averages and the top-k peaks (naive-mpc-optim, GridEnforcer fork)
+
+Swedish effect tariffs do not charge the highest single reading: they charge the **average of the k highest clock-hour averages** of grid import in the billing month. With the structural options `capacity_charge_hourly_average: true` and `capacity_charge_top_k: k` (plus `capacity_cost_per_kw` > 0), the demand charge becomes
+
+`capacity_cost_per_kw / k × sum_largest([hourly averages in the horizon] ∪ [existing top-k peaks], k)`
+
+so an hour below the k-th existing peak costs nothing, and the optimiser raises the peak only when that is cheaper than serving the energy from a battery or another hour. The runtime keys carry the per-call state:
+
+- `current_period_peaks`: the billing period's current top-k effective hourly peaks in **Watts** (any length; padded with zeros / truncated to k).
+- `current_hour_imported_wh`: energy already imported since the start of the current clock hour, in Wh.
+- `current_hour_elapsed_h`: hours already elapsed in the current clock hour, so the first horizon step is clipped and the imported energy is not counted twice.
+- `capacity_charge_window` doubles as the per-step **multiplier** (0 outside the tariff's window or season, e.g. 0.5 for a night rate, 1 inside).
+
+The result carries three constant columns: `planned_peak_w` (highest effective hourly average in the horizon), `planned_topk_avg_w` (what the period's top-k average becomes if the plan is followed) and `planned_hour0_w` (the current clock hour, imported energy included).
+
 ### Passing forecast data
 
 There is a complete dedicated section in the [Forecast](forecasts) section.

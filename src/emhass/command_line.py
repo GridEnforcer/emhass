@@ -288,6 +288,12 @@ class OptimizationCache:
         }
         # Optim conf parameters that don't affect problem structure
         # (parameterized via CVXPY Parameters, solver options, or forecast method selection)
+        # NOTE (ge-g65f): capacity_cost_per_kw, capacity_charge_hourly_average and
+        # capacity_charge_top_k are deliberately NOT listed here - they gate a
+        # variable / objective term and the shape of param_existing_peaks, so a
+        # change must rebuild the problem. Their per-call companions
+        # (capacity_charge_window, current_period_peaks, current_hour_*) are
+        # passed_data, never optim_conf.
         optim_conf_runtime_keys = {
             # Parameterized via CVXPY Parameters
             "operating_hours_of_each_deferrable_load",
@@ -2558,6 +2564,15 @@ async def naive_mpc_optim(
     capacity_charge_window = input_data_dict["params"]["passed_data"].get(
         "capacity_charge_window", None
     )
+    current_period_peaks = input_data_dict["params"]["passed_data"].get(
+        "current_period_peaks", None
+    )
+    current_hour_imported_wh = input_data_dict["params"]["passed_data"].get(
+        "current_hour_imported_wh", None
+    )
+    current_hour_elapsed_h = input_data_dict["params"]["passed_data"].get(
+        "current_hour_elapsed_h", None
+    )
     batt_start_timestep = input_data_dict["params"]["passed_data"].get("batt_start_timestep", None)
     batt_end_timestep = input_data_dict["params"]["passed_data"].get("batt_end_timestep", None)
     battery_initial_active = input_data_dict["params"]["passed_data"].get(
@@ -2587,6 +2602,9 @@ async def naive_mpc_optim(
             soc_target_timestep=soc_target_timestep,
             current_period_peak=current_period_peak,
             capacity_charge_window=capacity_charge_window,
+            current_period_peaks=current_period_peaks,
+            current_hour_imported_wh=current_hour_imported_wh,
+            current_hour_elapsed_h=current_hour_elapsed_h,
             batt_start_timestep=batt_start_timestep,
             batt_end_timestep=batt_end_timestep,
             battery_initial_active=battery_initial_active,
