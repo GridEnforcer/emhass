@@ -328,6 +328,10 @@ class Optimization:
         # Per-timestep demand-window mask for the capacity charge (issue #623, Phase 3)
         self._init_capacity_window_param()
 
+        # Clock-hour aggregation + existing top-k peaks for the hourly-average
+        # demand charge (GridEnforcer fork, ge-g65f)
+        self._init_capacity_hourly_params()
+
         # Initialize deferrable load parameters (window masks and energy constraints)
         self._init_deferrable_load_params()
 
@@ -447,6 +451,160 @@ class Optimization:
             self.num_timesteps, nonneg=True, name="capacity_window_mask"
         )
         self.param_capacity_window.value = np.ones(self.num_timesteps)
+
+    def _init_capacity_hourly_params(self) -> None:
+        """Initialize the CVXPY parameters for the hourly-average, top-k demand
+        charge (GridEnforcer fork, ge-g65f).
+
+        Swedish effect tariffs bill the average of the k highest CLOCK-HOUR
+        averages of grid import in the month, not the highest single timestep.
+        Three parameters carry the per-call shape of that rule so the problem
+        never rebuilds on a receding horizon:
+
+        - ``param_hour_agg`` (H x n, nonneg): row h holds, for every timestep in
+          clock hour h, ``time_step_h * multiplier[t]`` - an energy weight, so a
+          full hour of four 15-min steps sums to 1.0 x the hour's average W.
+          Steps of the first (partial) hour are clipped by the elapsed time so
+          energy already imported is not counted twice.
+        - ``param_hour_offset`` (H, nonneg): row 0 holds the energy already
+          imported this clock hour (Wh over a 1 h window == W of average)
+          times the hour's multiplier; other rows 0.
+        - ``param_existing_peaks`` (k, nonneg): the billing period's current
+          top-k effective hourly peaks in W, always exactly k entries.
+
+        ``hourly_eff = param_hour_agg @ p_grid_pos + param_hour_offset`` is
+        affine in the variable with parameter coefficients (DPP-safe), and the
+        objective prices ``sum_largest(hstack([hourly_eff, existing]), k)``.
+        H is fixed by the horizon length, so all three are re-created on
+        resize; k is structural (``capacity_charge_top_k``) so a change rebuilds.
+        Values default to zeros, which makes the term vanish.
+        """
+        rows = self._capacity_hour_rows()
+        k = self._capacity_top_k()
+        self.param_hour_agg = cp.Parameter(
+            (rows, self.num_timesteps), nonneg=True, name="capacity_hour_agg"
+        )
+        self.param_hour_agg.value = np.zeros((rows, self.num_timesteps))
+        self.param_hour_offset = cp.Parameter(rows, nonneg=True, name="capacity_hour_offset")
+        self.param_hour_offset.value = np.zeros(rows)
+        self.param_existing_peaks = cp.Parameter(k, nonneg=True, name="capacity_existing_peaks")
+        self.param_existing_peaks.value = np.zeros(k)
+
+    def _apply_capacity_hourly_params(
+        self,
+        data_opt: pd.DataFrame,
+        window_mask: np.ndarray,
+        current_period_peaks: list | None,
+        current_hour_imported_wh: float | None,
+        current_hour_elapsed_h: float | None,
+    ) -> None:
+        """Set the per-call values of the hourly top-k demand-charge parameters
+        (GridEnforcer fork, ge-g65f). See ``_init_capacity_hourly_params``.
+
+        Clock hours are found by flooring the (tz-aware) horizon index to the
+        hour in UTC, which sidesteps DST-ambiguous local times; the tariff's
+        hours are whole hours in either zone. ``window_mask`` (already validated
+        and clipped to [0, 1]) is the per-step multiplier baked into the weights
+        at set time - never multiplied symbolically with another Parameter.
+        Existing peaks are padded / truncated to exactly k: ``sum_largest`` over
+        fewer than k entries makes the maximisation unbounded.
+        """
+        rows = self.param_hour_agg.shape[0]
+        n = self.num_timesteps
+        k = self._capacity_top_k()
+        agg = np.zeros((rows, n))
+        offset = np.zeros(rows)
+        existing = np.zeros(k)
+        if not self._capacity_hourly_enabled():
+            self.param_hour_agg.value = agg
+            self.param_hour_offset.value = offset
+            self.param_existing_peaks.value = existing
+            return
+
+        idx = pd.DatetimeIndex(data_opt.index[:n])
+        if idx.tz is None:
+            idx = idx.tz_localize(self.time_zone)
+        hour_starts = idx.tz_convert("UTC").floor("h")
+        uniq = list(dict.fromkeys(hour_starts))
+        if len(uniq) > rows:
+            self.logger.warning(
+                f"Capacity charge: horizon touches {len(uniq)} clock hours but only "
+                f"{rows} rows are allocated (time step does not divide the hour?); "
+                "ignoring the extra hours."
+            )
+            uniq = uniq[:rows]
+        row_of = {h: r for r, h in enumerate(uniq)}
+        step = pd.Timedelta(self.freq)
+        elapsed = None
+        if current_hour_elapsed_h is not None:
+            try:
+                elapsed = float(current_hour_elapsed_h)
+            except (TypeError, ValueError):
+                elapsed = None
+            if elapsed is not None and (not isfinite(elapsed) or elapsed < 0):
+                elapsed = None
+        priced = 0
+        for t in range(n):
+            r = row_of.get(hour_starts[t])
+            if r is None:
+                continue
+            step_start = idx[t].tz_convert("UTC")
+            step_end = step_start + step
+            weight_h = self.time_step
+            if r == 0 and elapsed is not None:
+                # Only the part of the step after "now" is still plannable; the
+                # energy before it is in the offset.
+                hour_start = uniq[0]
+                lo = max(step_start, hour_start + pd.Timedelta(hours=elapsed))
+                hi = min(step_end, hour_start + pd.Timedelta(hours=1))
+                weight_h = max(0.0, (hi - lo).total_seconds() / 3600.0)
+            agg[r, t] = weight_h * float(window_mask[t])
+            if agg[r, t] > 0:
+                priced += 1
+
+        if current_hour_imported_wh is not None:
+            try:
+                imported = float(current_hour_imported_wh)
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    f"Invalid current_hour_imported_wh ({current_hour_imported_wh!r}); ignoring it."
+                )
+                imported = 0.0
+            if not isfinite(imported) or imported < 0:
+                imported = 0.0
+            first_mult = float(window_mask[0]) if n else 0.0
+            offset[0] = imported * first_mult
+
+        if current_period_peaks is not None:
+            try:
+                arr = np.asarray(current_period_peaks, dtype=float).ravel()
+            except (TypeError, ValueError):
+                self.logger.warning(
+                    f"Invalid current_period_peaks ({current_period_peaks!r}); using zeros."
+                )
+                arr = np.zeros(0)
+            bad = ~np.isfinite(arr) | (arr < 0)
+            if np.any(bad):
+                self.logger.warning(
+                    "current_period_peaks contains non-finite or negative entries; dropping them."
+                )
+                arr = arr[~bad]
+            if len(arr) > k:
+                self.logger.warning(
+                    f"current_period_peaks has {len(arr)} entries but capacity_charge_top_k "
+                    f"is {k}; keeping the {k} largest."
+                )
+                arr = np.sort(arr)[-k:]
+            existing[: len(arr)] = arr
+
+        self.param_hour_agg.value = agg
+        self.param_hour_offset.value = offset
+        self.param_existing_peaks.value = existing
+        self.logger.debug(
+            f"Capacity charge (hourly top-{k}): {len(uniq)} clock hours, {priced}/{n} steps "
+            f"priced, existing peaks {np.round(existing).tolist()} W, hour offset "
+            f"{offset[0]:.0f} Wh, elapsed {elapsed if elapsed is not None else 'n/a'} h"
+        )
 
     def _init_battery_availability_params(self) -> None:
         """Initialize per-battery availability-window power ceilings
@@ -1760,6 +1918,44 @@ class Optimization:
             return 0.0
         return value
 
+    def _capacity_hourly_enabled(self) -> bool:
+        """True when the demand charge prices clock-hour averages and the top-k
+        (GridEnforcer fork, ge-g65f) instead of the per-timestep peak of #623.
+
+        Gated on ``capacity_cost_per_kw > 0`` like the base feature, plus the
+        structural option ``capacity_charge_hourly_average``. Both live in
+        optim_conf and are part of the cache key, so flipping them rebuilds.
+        """
+        if self._get_capacity_cost_per_kw() <= 0:
+            return False
+        raw = self.optim_conf.get("capacity_charge_hourly_average", False)
+        if isinstance(raw, str):
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+        return bool(raw)
+
+    def _capacity_top_k(self) -> int:
+        """Number of hourly peaks averaged by the tariff (``capacity_charge_top_k``),
+        coerced to an int >= 1 (1 reproduces a plain highest-hour charge)."""
+        raw = self.optim_conf.get("capacity_charge_top_k", 1)
+        try:
+            k = int(float(raw))
+        except (TypeError, ValueError):
+            self.logger.warning(
+                f"Invalid capacity_charge_top_k value ({raw!r}); using 1 (highest hour)."
+            )
+            return 1
+        if k < 1:
+            self.logger.warning(
+                f"capacity_charge_top_k must be >= 1, got {raw!r}; using 1 (highest hour)."
+            )
+            return 1
+        return k
+
+    def _capacity_hour_rows(self) -> int:
+        """Number of clock hours the horizon can touch: ceil(n * step_h) + 1
+        (a horizon not starting on the hour spills into one extra hour)."""
+        return int(ceil(self.num_timesteps * self.time_step)) + 1
+
     def _initialize_decision_variables(self):
         """
         Initialize all main decision variables for the CVXPY problem.
@@ -1955,7 +2151,12 @@ class Optimization:
         # max(p_grid_pos) over the horizon; the cost on it is added in
         # _build_objective_function. The gate is a static config value so it is
         # part of the OptimizationCache key (a change rebuilds the problem).
-        if self._get_capacity_cost_per_kw() > 0:
+        if self._capacity_hourly_enabled():
+            # Hourly top-k charge (GridEnforcer fork, ge-g65f): no extra variable
+            # or constraint - cp.sum_largest is an LP-representable atom and the
+            # whole term lives in _build_objective_function.
+            pass
+        elif self._get_capacity_cost_per_kw() > 0:
             vars_dict["peak_import"] = cp.Variable(nonneg=True, name="peak_import")
             # Epigraph masked to the tariff's demand window (issue #623, Phase 3):
             # param_capacity_window is all-ones by default, reproducing the plain
@@ -2284,7 +2485,20 @@ class Optimization:
         # and divided by 1000 to price it in kW. Subtracted because the objective
         # is maximised.
         capacity_cost_per_kw = self._get_capacity_cost_per_kw()
-        if capacity_cost_per_kw > 0 and "peak_import" in self.vars:
+        if self._capacity_hourly_enabled():
+            # Hourly-average, top-k demand charge (GridEnforcer fork, ge-g65f):
+            # the tariff bills price_per_kw x mean(top-k clock-hour averages of
+            # the billing period). Raising one of the top-k hours by dP therefore
+            # costs price/k x dP, and any hour below the k-th existing peak is
+            # free. hourly_eff is affine (Parameter @ Variable + Parameter) and
+            # sum_largest is convex, so the negated term is concave in this
+            # maximisation and DPP-safe. Not scaled by time_step (power charge);
+            # W -> kW via /1000.
+            k = self._capacity_top_k()
+            hourly_eff = self.param_hour_agg @ self.vars["p_grid_pos"] + self.param_hour_offset
+            pool = cp.hstack([hourly_eff, self.param_existing_peaks])
+            objective_terms.append(-(capacity_cost_per_kw / 1000.0 / k) * cp.sum_largest(pool, k))
+        elif capacity_cost_per_kw > 0 and "peak_import" in self.vars:
             objective_terms.append(-capacity_cost_per_kw * (self.vars["peak_import"] / 1000.0))
 
         # Curtailment timing tie-break (issue #342). p_pv_curtailment carries no cost
@@ -4484,6 +4698,32 @@ class Optimization:
             self.plant_conf.get("maximum_power_to_grid", 9000), "maximum_power_to_grid", n
         )
 
+        # Planned peak of the hourly-average demand charge (GridEnforcer fork,
+        # ge-g65f): constant columns so the value rides the per-timestep plan
+        # records to the caller. planned_peak_w = highest effective clock-hour
+        # average in the horizon; planned_topk_avg_w = what the billing period's
+        # top-k average becomes if the plan is followed; planned_hour0_w = the
+        # current clock hour (already-imported energy included).
+        if self._capacity_hourly_enabled():
+            agg = self.param_hour_agg.value
+            hourly_eff = agg @ opt_tp["P_grid_pos"].to_numpy(dtype=float) + (
+                self.param_hour_offset.value
+            )
+            rows_used = int(np.count_nonzero(agg.sum(axis=1) > 0))
+            k = self._capacity_top_k()
+            used = hourly_eff[:rows_used] if rows_used else np.zeros(0)
+            planned_peak_w = float(used.max()) if rows_used else 0.0
+            pool = np.concatenate([used, self.param_existing_peaks.value])
+            planned_topk_avg_w = float(np.sort(pool)[-k:].mean()) if pool.size else 0.0
+            opt_tp["planned_peak_w"] = planned_peak_w
+            opt_tp["planned_topk_avg_w"] = planned_topk_avg_w
+            opt_tp["planned_hour0_w"] = float(hourly_eff[0]) if rows_used else 0.0
+            self.logger.info(
+                f"Capacity charge: planned peak {planned_peak_w:.0f} W "
+                f"(top-{k} avg {planned_topk_avg_w:.0f} W, this hour "
+                f"{opt_tp['planned_hour0_w'].iloc[0]:.0f} W)"
+            )
+
         # Cost scaling factor (kW conversion and sign flip for minimization -> profit)
         scale = -0.001 * self.time_step
 
@@ -4578,6 +4818,9 @@ class Optimization:
         soc_target_timestep: int | None = None,
         current_period_peak: float | None = None,
         capacity_charge_window: list | None = None,
+        current_period_peaks: list | None = None,
+        current_hour_imported_wh: float | None = None,
+        current_hour_elapsed_h: float | None = None,
         batt_start_timestep: list | None = None,
         batt_end_timestep: list | None = None,
         battery_initial_active: list | None = None,
@@ -4639,6 +4882,10 @@ class Optimization:
             # (issue #623, Phase 3) - it is a vector param, so unlike the scalar
             # current_period_peak below it MUST be re-created on resize.
             self._init_capacity_window_param()
+
+            # Re-initialize the clock-hour aggregation / existing-peaks params
+            # with the new horizon (GridEnforcer fork, ge-g65f) - H follows n.
+            self._init_capacity_hourly_params()
 
             # Re-initialize the per-battery availability power ceilings with
             # the new horizon (GridEnforcer fork) - vector params, same rule.
@@ -4833,6 +5080,17 @@ class Optimization:
                     f"{int(np.count_nonzero(window_mask))}/{self.num_timesteps} timesteps."
                 )
         self.param_capacity_window.value = window_mask
+
+        # Clock-hour aggregation, hour offset and existing top-k peaks for the
+        # hourly-average demand charge (GridEnforcer fork, ge-g65f). Always
+        # applied so nothing leaks between MPC ticks (zeros when disabled).
+        self._apply_capacity_hourly_params(
+            data_opt,
+            window_mask,
+            current_period_peaks,
+            current_hour_imported_wh,
+            current_hour_elapsed_h,
+        )
 
         # Pad deferrable load lists
         if def_total_timestep is not None:
@@ -6011,6 +6269,9 @@ class Optimization:
         soc_target_timestep: int | None = None,
         current_period_peak: float | None = None,
         capacity_charge_window: list | None = None,
+        current_period_peaks: list | None = None,
+        current_hour_imported_wh: float | None = None,
+        current_hour_elapsed_h: float | None = None,
         batt_start_timestep: list | None = None,
         batt_end_timestep: list | None = None,
         battery_initial_active: list | None = None,
@@ -6080,6 +6341,18 @@ class Optimization:
             Ignored when ``capacity_cost_per_kw`` is 0. Runtime-only; only \
             used by naive-mpc-optim. See issue #623.
         :type capacity_charge_window: list
+        :param current_period_peaks: Optional list of the billing period's current top-k \
+            effective clock-hour peaks in Watts for the hourly-average demand charge \
+            (``capacity_charge_hourly_average``); padded / truncated to \
+            ``capacity_charge_top_k`` entries. GridEnforcer fork, ge-g65f.
+        :type current_period_peaks: list
+        :param current_hour_imported_wh: Optional energy already imported this clock \
+            hour (Wh), added to the current hour's planned import. GridEnforcer fork.
+        :type current_hour_imported_wh: float
+        :param current_hour_elapsed_h: Optional hours already elapsed in the current \
+            clock hour, used to clip the first step so imported energy is not counted \
+            twice. GridEnforcer fork.
+        :type current_hour_elapsed_h: float
         :param def_total_timestep: The functioning timesteps for this iteration for each deferrable load. \
             (For continuous deferrable loads: functioning timesteps at nominal power)
         :type def_total_timestep: list
@@ -6133,6 +6406,9 @@ class Optimization:
             soc_target_timestep=soc_target_timestep,
             current_period_peak=current_period_peak,
             capacity_charge_window=capacity_charge_window,
+            current_period_peaks=current_period_peaks,
+            current_hour_imported_wh=current_hour_imported_wh,
+            current_hour_elapsed_h=current_hour_elapsed_h,
             batt_start_timestep=batt_start_timestep,
             batt_end_timestep=batt_end_timestep,
             battery_initial_active=battery_initial_active,
